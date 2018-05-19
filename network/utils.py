@@ -51,13 +51,13 @@ def get_sample_num(x):
         return x.shape[0]
 
 
-def sklearn_shuffle(x, y, random_state):
-    if isinstance(x, list):
-        l = len(x)
-        res = shuffle(*x, y, random_state=random_state)
+def sklearn_shuffle(data, random_state):
+    if isinstance(data, list):
+        l = len(data)
+        res = shuffle(data, random_state=random_state)
         return res[:l], res[-1]
     else:
-        return shuffle(x, y, random_state=random_state)
+        return shuffle(data, random_state=random_state)
 
 
 def sklearn_split(x, y, test_size, random_state):

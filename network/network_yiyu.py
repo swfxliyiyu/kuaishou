@@ -1,3 +1,4 @@
+import pandas as pd
 import tensorflow as tf
 import time
 import numpy as np
@@ -7,7 +8,7 @@ from .utils import (get_sample_num, new_variable_initializer,
 
 
 class Model(object):
-    def __init__(self, num_user, num_recent_item, num_words, dim_k, reg, lr, prefix, seed=1024, checkpoint_path=None):
+    def __init__(self, num_user, num_recent_item, num_words, one_hots_dims, dim_k, reg, lr, prefix, seed=1024, checkpoint_path=None):
         self.seed = seed
         if checkpoint_path and checkpoint_path.count('/') < 2:
             raise ValueError('checkpoint_path must be dir/model_name format')
@@ -31,6 +32,7 @@ class Model(object):
         self.reg = reg
         self.lr = lr
         self.prefix = prefix
+        self.one_hots_dims = one_hots_dims
 
     def _get_optimizer_loss(self, ):
         return self.loss
@@ -59,6 +61,11 @@ class Model(object):
 
         self.recent_words_values_b = tf.placeholder(shape=[-1], dtype=tf.float32)  # [num_indices]
 
+        # 其余物品的one-hot信息
+        self.one_hots_a = tf.placeholder(shape=[-1, len(self.one_hots_dims)], dtype=tf.float32)  #[batch_size, num_one_hots]
+        self.one_hots_b = tf.placeholder(shape=[-1, len(self.one_hots_dims)], dtype=tf.float32)  #[batch_size, num_one_hots]
+
+
     def _create_weights(self):
         self.Wu_Emb = tf.get_variable(shape=[self.num_user, self.dim_k], initializer=tf.random_normal_initializer,
                                       dtype=tf.float32, name='user_embedding')
@@ -85,12 +92,19 @@ class Model(object):
         self.c_Att = tf.get_variable(shape=[1], initializer=tf.zeros_initializer,
                                      dtype=tf.float32, name='bias2_attention')
 
+        self.W_one_hots = []
+        for iter in range(len(self.one_hots_dims)):
+            W_temp = tf.get_variable(shape=[self.one_hots_dims[iter], self.dim_k], initializer=tf.random_normal_initializer,
+                                      dtype=tf.float32, name='one_hot_{}'.format(iter))
+            self.W_one_hots.append(W_temp)
+
         self.params = [self.Wu_Emb, self.Wwords_Emb, self.Wu_Att, self.Wwords_Att, self.Wi_Att, self.b_Att, self.w_Att,
-                       self.c_Att]
+                       self.c_Att] + self.W_one_hots
 
     def _forward_pass(self, ):
         # 物品的向量表示
         with tf.name_scope('item_express'):
+
             I_Wds_a = tf.sparse_to_dense(sparse_indices=self.item_words_indices_a,
                                          output_shape=[-1, self.num_words],
                                          sparse_values=self.item_words_values_a)  # [batch_size, num_recent_item, num_words]
@@ -99,6 +113,15 @@ class Model(object):
                                          sparse_values=self.item_words_values_b)  # [batch_size, num_recent_item, num_words]
             self.I_Wds_Emb_a = tf.matmul(I_Wds_a, self.Wwords_Emb)  # [batch_size, dim_k]
             self.I_Wds_Emb_b = tf.matmul(I_Wds_b, self.Wwords_Emb)  # [batch_size, dim_k]
+            self.I_One_hot_a = []
+            self.I_One_hot_b = []
+            for iter in range(len(self.one_hots_dims)):
+                I_Emb_temp_a = tf.nn.embedding_lookup(self.W_one_hots[iter], self.one_hots_a[:, iter])  # [batch_size, dim_k]
+                I_Emb_temp_b = tf.nn.embedding_lookup(self.W_one_hots[iter], self.one_hots_b[:, iter])  # [batch_size, dim_k]
+                self.I_One_hot_a.append(I_Emb_temp_a)
+                self.I_One_hot_b.append(I_Emb_temp_b)
+            self.Item_Expr_a = tf.add_n(self.I_One_hot_a+[self.I_Wds_Emb_a])
+            self.Item_Expr_b = tf.add_n(self.I_One_hot_b+[self.I_Wds_Emb_b])
 
         # 用户的向量表示
         with tf.name_scope('user_express'):
@@ -121,7 +144,7 @@ class Model(object):
             att_u_a = tf.matmul(self.Usr_Emb, self.Wu_Att)  # [batch_size, dim_k]
             att_rct_a = tf.tensordot(self.Rct_Wds_Emb_a, self.Wwords_Att,
                                      axes=[[2], [0]])  # [batch_size, num_recent_item, dim_k]
-            att_i_a = tf.matmul(self.I_Wds_Emb_a, self.Wi_Att)  # [batch_size, dim_k]
+            att_i_a = tf.matmul(self.Item_Expr_a, self.Wi_Att)  # [batch_size, dim_k]
             att_a = tf.nn.relu(att_rct_a + att_u_a + att_i_a + self.b_Att)  # [batch_size, num_recent_item, dim_k]
             att_a = tf.reduce_sum(att_a * self.w_Att, axis=2) + self.c_Att  # [batch_size, num_recent_item]
             self.att_a = tf.nn.softmax(att_a)  # [batch_size, num_recent_item]
@@ -130,7 +153,7 @@ class Model(object):
             att_u_b = tf.matmul(self.Usr_Emb, self.Wu_Att)  # [batch_size, dim_k]
             att_rct_b = tf.tensordot(self.Rct_Wds_Emb_b, self.Wwords_Att,
                                      axes=[[2], [0]])  # [batch_size, num_recent_item, dim_k]
-            att_i_b = tf.matmul(self.I_Wds_Emb_b, self.Wi_Att)  # [batch_size, dim_k]
+            att_i_b = tf.matmul(self.Item_Expr_b, self.Wi_Att)  # [batch_size, dim_k]
             att_b = tf.nn.relu(att_rct_b + att_u_b + att_i_b + self.b_Att)  # [batch_size, num_recent_item, dim_k]
             att_b = tf.reduce_sum(att_b * self.w_Att, axis=2) + self.c_Att  # [batch_size, num_recent_item]
             self.att_b = tf.nn.softmax(att_b)  # [batch_size, num_recent_item]
@@ -145,8 +168,8 @@ class Model(object):
             self.Usr_Expr_b = tf.add_n([self.Usr_Emb, self.Rct_Wds_Expr_b])  # [batch_size, dim_k]
         with tf.name_scope('output'):
             # 输出两个结果
-            self.y_ui_a = tf.reduce_sum(self.Rct_Wds_Expr_a * self.Usr_Expr_a, axis=1)
-            self.y_ui_b = tf.reduce_sum(self.Rct_Wds_Expr_b * self.Usr_Expr_b, axis=1)
+            self.y_ui_a = tf.reduce_sum(self.Item_Expr_a * self.Usr_Expr_a, axis=1)
+            self.y_ui_b = tf.reduce_sum(self.Item_Expr_b * self.Usr_Expr_b, axis=1)
 
     def _create_loss(self):
         self.loss = - tf.reduce_sum(tf.log(tf.nn.sigmoid(self.y_ui_a - self.y_ui_b)))
@@ -240,9 +263,8 @@ class Model(object):
                     self.sess)  # 如果更换了优化器，需要重新初始化一些变量
             self.sess.run(init_op)
 
-    def train_on_batch(self, user_indices, item_words_indices_a, item_words_indices_b, recent_words_indices_a,
-                       recent_words_indices_b):  # fit a batch
-
+    def train_on_batch(self, input_data):  # fit a batch
+        user_indices = input_data['user_indices']
         feed_dict_ = {self.user_indices: user_indices, self.item_words_indices_a: item_words_indices_a,
                       self.item_words_indices_b: item_words_indices_b,
                       self.item_words_values_a: item_words_values_a,
@@ -253,12 +275,35 @@ class Model(object):
         self.sess.run([self.optimizer], feed_dict=feed_dict_)
 
 
+    def test_on_batch(self, test_data):
+        """
+        evaluate sum of batch loss
+        """
+        feed_dict_ = {self._get_input_target(): y, self.train_flag: False,
+                      self.sample_weight: np.ones(y.shape[0])}
+        input_data = self._get_input_data()
+        if isinstance(input_data, list):
+            for i in range(len(input_data)):
+                feed_dict_[input_data[i]] = x[i]
+        else:
+            feed_dict_[input_data] = x
+        score = self.sess.run(self.metric_list, feed_dict=feed_dict_)
 
-    def fit(self, user_indices, item_words_indices_a, item_words_indices_b, recent_words_indices_a,
-                       recent_words_indices_b, batch_size=1024, epochs=50, validation_split=0.0, validation_data=None,
-            val_size=2 ** 18, shuffle=True, initial_epoch=0, min_display=50, max_iter=-1):
+        if class_weight is None and sample_weight is None:
+            return np.mean(score[0])
 
-        n_samples = get_sample_num(user_indices)
+        sample_weight = self._compute_sample_weight(
+            y, class_weight, sample_weight)
+        weighted_score = np.mean(score[0] * sample_weight)
+        return weighted_score
+
+
+
+
+    def fit(self, input_data, batch_size=1024, epochs=50, validation_data=None,
+                       val_size=2 ** 18, shuffle=True, initial_epoch=0, min_display=50, max_iter=-1):
+
+        n_samples = get_sample_num(input_data)
         iters = (n_samples - 1) // batch_size + 1
         self.tr_loss_list = []
         self.val_loss_list = []
@@ -268,28 +313,24 @@ class Model(object):
         stop_flag = False
         self.best_loss = np.inf
         self.best_ckpt = None
-        if not validation_data and validation_split > 0:
-            x, val_x, y, val_y = sklearn_split(
-                x, y, test_size=validation_split, random_state=self.seed)
-            validation_data = [(val_x, val_y)]
 
         for i in range(epochs):
             if i < initial_epoch:
                 continue
             if shuffle:
-                x, y = sklearn_shuffle(x, y, random_state=self.seed)
+                input_data = sklearn_shuffle(input_data, random_state=self.seed)
             for j in range(iters):
-                if isinstance(x, list):
+                if isinstance(input_data, list):
                     batch_x = [
-                        item[j * batch_size:(j + 1) * batch_size] for item in x]
+                        item[j * batch_size:(j + 1) * batch_size] for item in input_data]
+                elif isinstance(input_data, pd.DataFrame):
+                    batch_x = input_data.iloc[j * batch_size:(j + 1) * batch_size, :]
                 else:
-                    batch_x = x[j * batch_size:(j + 1) * batch_size]
-                batch_y = y[j * batch_size:(j + 1) * batch_size]
-
+                    batch_x = input_data[j * batch_size:(j + 1) * batch_size]
                 self.train_on_batch(
-                    batch_x, batch_y)
+                    batch_x)
                 if j % min_display == 0:
-                    tr_loss = self.evaluate(x, y, val_size, None, None)
+                    tr_loss = self.test_on_batch(input_data, val_size)
                     self.tr_loss_list.append(tr_loss)
                     total_time = time.time() - start_time
                     if validation_data is None:
@@ -297,7 +338,7 @@ class Model(object):
                                                                                                        total_time))
                     else:
                         val_loss = self.evaluate(
-                            validation_data[0][0], validation_data[0][1], val_size)
+                            validation_data, val_size)
                         self.val_loss_list.append(val_loss)
                         print(
                             "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
@@ -306,9 +347,7 @@ class Model(object):
                         if val_loss < self.best_loss:
                             self.best_loss = val_loss
                             # self.save_model(self.checkpoint_path+'best')
-
                 # self.save_model(self.checkpoint_path)
-
                 if (i * iters) + j == max_iter:
                     stop_flag = True
                     break
