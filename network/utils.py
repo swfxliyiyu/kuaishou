@@ -59,11 +59,11 @@ def sklearn_shuffle(data, random_state):
     else:
         return shuffle(data, random_state=random_state)
 
-
-def sklearn_split(x, y, test_size, random_state):
-    if isinstance(x, list):
-        l = len(x)
-        res = train_test_split(*x, y, test_size=test_size, random_state=random_state)
-        return res[0:2 * l:2], res[1:2 * l:2], res[-1], res[-2], res[-1]
-    else:
-        return train_test_split(x, y, test_size=test_size, random_state=random_state)
+#
+# def sklearn_split(x, y, test_size, random_state):
+#     if isinstance(x, list):
+#         l = len(x)
+#         res = train_test_split(*x, y, test_size=test_size, random_state=random_state)
+#         return res[0:2 * l:2], res[1:2 * l:2], res[-1], res[-2], res[-1]
+#     else:
+#         return train_test_split(x, y, test_size=test_size, random_state=random_state)

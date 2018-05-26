@@ -1,17 +1,76 @@
 import pandas as pd
 import json
 import numpy as np
+from gensim.models import Word2Vec
 from joblib import Parallel, delayed
-from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.preprocessing import MultiLabelBinarizer, LabelEncoder
+from itertools import chain
+from collections import defaultdict
+
+cnt = 0
 
 
 def handle_text(text):
+    dic = {}
+    dic_count = defaultdict(lambda: 0)
+    for row in text['text']:
+        lst = row.strip().split(',')
+        lst = [int(x) for x in lst]
+        for ele in lst:
+            dic_count[ele] += 1
+    dic_count = pd.Series(dic_count)
+    print('before filtering', len(dic_count))
+    dic_count = dic_count[dic_count < 2]
+    print('after filtering', len(dic_count))
+    dic_count = set(dic_count.index)
+    print(dic_count)
+    empty = np.array([])
+
+    def func(x):
+        x = int(x)
+        if x in dic:
+            return dic[x]
+        else:
+            global cnt
+            dic[x] = cnt
+            cnt += 1
+            return dic[x]
+
     def split_text(x):
         lst = x.strip().split(',')
-        return lst
+        lst = [func(x) for x in lst if (x != '0' and int(x) not in dic_count)]
+        if not lst:
+            return empty
+        else:
+            return np.sort(lst)
 
-    text['text'] = text['text'].apply(split_text)
+    text['words'] = text['text'].apply(split_text)
+    del text['text']
     print(text)
+    return text
+
+
+def words_to_vec(text):
+    W2V_PATH = '../data/word2vec/word2vec.model'
+    model = Word2Vec.load(W2V_PATH)
+    empty = np.zeros([128])
+
+    def sentence2vec(sentence):
+        sentence = sentence.strip().split(',')
+        words_vecters = []
+        for word in sentence:
+            try:
+                words_vecters.append(model.wv[word])
+            except KeyError:
+                print(word, "not in vocabulary")
+                continue
+        if not words_vecters:
+            sentence_vec = empty
+        else:
+            sentence_vec = np.mean(words_vecters, axis=0)
+        return sentence_vec
+
+    text['words_vec'] = text['text'].apply(sentence2vec)
     return text
 
 
@@ -19,8 +78,10 @@ count = 0
 
 
 def handle_face(face):
-    columns = ['pid', 'face_num', 'face_max_percent', 'face_whole_percent', 'face_male_num', 'face_famale_num',
-               'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']
+    columns = ['pid_01', 'face_num_01', 'face_max_percent_01', 'face_whole_percent_01', 'face_male_num_01',
+               'face_famale_num_01',
+               'face_gender_mix_01', 'face_ave_age_01', 'face_max_appear_01', 'face_min_appear_01',
+               'face_ave_appear_01']
     total = face.shape[0]
 
     def get_face_property(x):
@@ -42,17 +103,20 @@ def handle_face(face):
         res = [len(faces), int(np.max(percents) * 10), int(np.sum(percents) * 10),
                np.sum([g for g in genders if g == 0]), np.sum([g for g in genders if g == 1]),
                1 if (0 in genders and 1 in genders) else 0, np.mean(ages) // 2, np.max(appears) // 3,
-               np.min(appears) // 3, np.min(appears) // 3, ]
+               np.min(appears) // 3, np.mean(appears) // 3, ]
         global count
         if count % 10000 == 0:
             print(count / total)
         count += 1
         return res
 
-    new_df = [get_face_property(x) for x in face['faces']]
-    face = np.concatenate([face[['pid']], new_df], axis=1)
-    face = pd.DataFrame(face, columns=columns)
-    # face = pd.merge(face, new_df, how='outter', left_index=True, right_index=True)
+    new_col = [get_face_property(x) for x in face['faces']]
+    new_col = np.array(new_col)
+    for col in range(new_col.shape[1]):
+        encoder = LabelEncoder()
+        new_col[:, col] = encoder.fit_transform(new_col[:, col])
+    face = pd.DataFrame({'pid': face['pid'].tolist(), 'face_cols': new_col.tolist()})
+    face['face_cols'] = face['face_cols'].apply(lambda lst: np.asarray(lst))
     print(face)
     return face
 
@@ -116,29 +180,33 @@ def handle_inter(inter, recent_num=50):
     return inter
 
 
-def _item_words_indices_and_values(recents):
-    def func():
-        for ix, words in enumerate(recents):
-            for word in words:
-                yield [ix, word]
-
-    indices = list(func())
-    values = [1] * len(indices)
-    return indices, values
+# def _item_words_indices_and_values(recents):
+#     def func():
+#         for ix, words in enumerate(recents):
+#             for word in words:
+#                 yield [ix, word]
+#     indices = list(func())
+#     values = [1] * len(indices)
+#     return indices, values
 
 
 def yield_rows(inter):
     count = 0
     total = inter.shape[0]
-    for rows in np.array_split(inter, 1000):
+    for rows in np.array_split(inter, 12 * 5):
         count += rows.shape[0]
-        print(rows)
         print(count / total)
         yield rows
 
 
 def get_words(rows, dic):
-    return np.concatenate([[dic.get(x, [0]) for x in pids] for pids in rows['pids']])
+    def func(pids):
+        for ix, pid in enumerate(pids):
+            for word in dic.get(pid, [0]):
+                yield [ix, word]
+
+    lst = [list(func(pids)) for pids in rows['pids']]
+    return lst
 
 
 def add_new_columns(inter):
@@ -147,11 +215,10 @@ def add_new_columns(inter):
     text = pd.read_pickle('../data/text_features.pkl')
     # text = pd.concat([train_text, test_text], ignore_index=True)
     # text.columns = ['pid', 'text']
-    new_column = []
     dic = text['text']
     dic.index = text['pid'].tolist()
     dic = dic.to_dict()
-    lst = Parallel(n_jobs=12)(
+    lst = Parallel(n_jobs=-2, backend='multiprocessing')(
         delayed(get_words)(rows, dic) for rows in yield_rows(inter))
     # for pids in inter['pids']:
     #     df = pd.DataFrame()
@@ -162,12 +229,42 @@ def add_new_columns(inter):
     #     if count % 1000 == 0:
     #         print(count / total, df['text'].tolist())
     #     count += 1
-    lst = np.concatenate(lst)
+    lst = list(chain(*lst))
     inter['recent_words'] = lst
     return inter
 
 
+def yeild_udf(inter):
+    uids = set(inter['uid'])
+    total = len(uids)
+    count = 0
+    for uid in uids:
+        df_u = inter[inter['uid'] == uid]
+        if count % 100 == 0:
+            print(count / total)
+        count += 1
+        yield df_u
+
+
+def get_val_set(df_u, val_rate):
+    pids = df_u['pid'].drop_duplicates().tolist()
+    pids = pids[int(len(pids) * (1 - val_rate)):]
+    pids = set(pids)
+    df_u['index'] = df_u.index
+    result = df_u['index'][[(x in pids) for x in df_u['pid']]]
+    return result
+
+
+def parallel_get_val_set(data, val_rate):
+    lst = Parallel(n_jobs=12)(
+        delayed(get_val_set, val_rate)(df_u, val_rate) for df_u in yeild_udf(data))
+    result = pd.np.concatenate(lst)
+    return result
+
+
 if __name__ == '__main__':
+
+    "================================加入历史pid================================="
     # train_inter = pd.read_pickle('../data/train_interaction.pkl')
     # train_inter.columns = ['uid', 'pid', 'click', 'like', 'follow', 'time', 'playing_time', 'duration_time']
     # test_inter = pd.read_pickle('../data/test_interaction.pkl')
@@ -179,42 +276,72 @@ if __name__ == '__main__':
     # inter = parallel_handle_inter(inter, recent_num=30)
     # inter.to_pickle('../data/recent_inter.pkl')
 
-    # train_text = pd.read_pickle('../data/train_text.pkl')
-    # test_text = pd.read_pickle('../data/test_text.pkl')
-    # text = pd.concat([train_text, test_text])
-    # text.columns = ['pid', 'text']
-    # text = handle_text(text)
-    # text.to_pickle('../data/text_features.pkl')
-    #
+    train_text = pd.read_pickle('../data/train_text.pkl')
+    test_text = pd.read_pickle('../data/test_text.pkl')
+    text = pd.concat([train_text, test_text])
+    text.columns = ['pid', 'text']
+    text = handle_text(text)
+    s = set()
+    for t in text['words']:
+        s.update(t.tolist())
+    print(text)
+    print(len(s))
+    print(max(list(s)))
+    text.to_pickle('../data/text_features.pkl')
+
     # train_face = pd.read_pickle('../data/train_face.pkl')
     # test_face = pd.read_pickle('../data/test_face.pkl')
     # face = pd.concat([train_face, test_face])
     # face.columns = ['pid', 'faces']
     # face = handle_face(face)
     # face.to_pickle('../data/face_features.pkl')
-    #
-    # face = pd.read_pickle('../data/face_features.pkl')
-    # text = pd.read_pickle('../data/text_features.pkl')
-    # df = pd.merge(face, text, how='outer', on=['pid'])
+
+    # train_text = pd.read_pickle('../data/train_text.pkl')
+    # test_text = pd.read_pickle('../data/test_text.pkl')
+    # text = pd.concat([train_text, test_text])
+    # text.columns = ['pid', 'text']
+    # text = words_to_vec(text)
+    # print(text)
+    # text.to_pickle('../data/words_vec_features.pkl')
+
+    face = pd.read_pickle('../data/face_features.pkl')
+    text = pd.read_pickle('../data/text_features.pkl')
+    text_vec = pd.read_pickle('../data/words_vec_features.pkl')
+    text = pd.merge(text, text_vec, on=['pid'])
+    df = pd.merge(face, text, how='outer', on=['pid'])
     # for col in ['face_num', 'face_max_percent', 'face_whole_percent', 'face_male_num', 'face_famale_num',
-    #            'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']:
+    #             'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']:
     #     df[col] = df[col].fillna(0)
-    # df['text'] = df['text'].replace({np.nan: [0]})
-    # print(df.sort_values(['pid']))
-    # df.to_pickle('../data/item_features.pkl')
+    empty = np.array([])
+    df['text'] = df['text'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    empty = np.zeros([10])
+    df['face_cols'] = df['face_cols'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    empty = np.zeros([128])
+    df['words_vec'] = df['words_vec'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    print(df.sort_values(['pid']))
+    df.to_pickle('../data/item_features.pkl')
 
-    # recent = pd.read_pickle('../data/recent_inter.pkl')
-    # recent.index = range(recent.shape[0])
-    # print(recent.columns)
-    # item = pd.read_pickle('../data/item_features.pkl')
-    # print(item.columns)
-    # inter = pd.merge(recent, item, how='left', on=['pid'])
-    # inter.to_pickle('../data/inter.pkl')
 
-    inter = pd.read_pickle('../data/data.pkl')
-    print(inter[inter['is_val'] == 0].shape[0])
-    print(inter[inter['is_val'] == 1].shape[0])
-    inter['is_val'] = inter['is_val'].replace({1: True, 0: False})
-    inter = add_new_columns(inter)
+    recent = pd.read_pickle('../data/recent_inter.pkl')
+    recent.index = range(recent.shape[0])
+    print(recent.columns)
+    item = pd.read_pickle('../data/item_features.pkl')
+    print(item.columns)
+    inter = pd.merge(recent, item, how='left', on=['pid'])
     print(inter)
-    inter.to_pickle('../data/inter_1.pkl')
+    print(inter.columns)
+    inter.to_pickle('../data/interaction_features.pkl')
+
+    # df = pd.read_pickle('../data/interaction_features.pkl')
+    df = inter
+    df.index = range(df.shape[0])
+    print(df)
+    val_set = parallel_get_val_set(df[df['is_test'] == False], 0.1)
+    # df = df.drop(index=val_set.index)
+    df['is_val'] = False
+    # df['is_val'] = False
+    # val_set['is_val'] = True
+    # df = pd.concat([df, val_set])
+    df.loc[val_set, 'is_val'] = True
+    print(df)
+    df.to_pickle('../data/interaction_features_1.pkl')

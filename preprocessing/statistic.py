@@ -2,7 +2,14 @@ import pandas as pd
 
 if __name__ == '__main__':
     # tr_df = pd.read_pickle('../data/train_interaction.pkl')
+    # tr_df.columns = ['uid', 'pid', 'click', 'like', 'follow', 'time', 'playing_time', 'duration_time']
     # te_df = pd.read_pickle('../data/test_interaction.pkl')
+    # te_df.columns = ['uid', 'pid', 'time', 'duration_time']
+    # df = pd.concat([tr_df, te_df])
+    # uids = df['uid'].drop_duplicates()
+    # print(uids.max())
+    # print(len(uids))
+
     # tr_photo = tr_df[1]
     # te_photo = te_df[1]
     # tr_user = tr_df[0]
@@ -16,7 +23,8 @@ if __name__ == '__main__':
     ser_text2 = pd.read_pickle('../data/test_text.pkl')[1]
     s = set()
     for text in ser_text1:
-        s.update(text.split(','))
+        s.update([int(x) for x in text.split(',')])
     for text in ser_text2:
-        s.update(text.split(','))
+        s.update([int(x) for x in text.split(',')])
     print(len(s))
+    print(max(list(s)))
