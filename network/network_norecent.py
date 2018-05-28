@@ -81,6 +81,8 @@ class Model(object):
 
         self.batch_size = tf.placeholder(shape=[], dtype=tf.int32, name='batch_size')  # num of batch size
 
+        self.train_phase = tf.placeholder(shape=[], dtype=tf.bool, name='train_phase')
+
         # deep特征
         if self.use_deep:
             self.num_features = tf.placeholder(shape=[None, self.dim_num_feat], dtype=tf.float32,
@@ -150,6 +152,25 @@ class Model(object):
                                          dtype=tf.float32, name='deep_one_hot_{}'.format(i))
                 self.W_deep_one_hots.append(W_temp)
 
+    def _batch_norm_layer(self, x, train_phase, scope_bn):
+        with tf.variable_scope(scope_bn):
+            beta = tf.Variable(tf.constant(0.0, shape=[x.shape[-1]]), name='beta', trainable=True)
+            gamma = tf.Variable(tf.constant(1.0, shape=[x.shape[-1]]), name='gamma', trainable=True)
+            # axises = np.arange(len(x.shape) - 1)
+            batch_mean, batch_var = tf.nn.moments(x, [0], name='moments')
+            ema = tf.train.ExponentialMovingAverage(decay=0.5)
+
+            def mean_var_with_update():
+                ema_apply_op = ema.apply([batch_mean, batch_var])
+                with tf.control_dependencies([ema_apply_op]):
+                    return tf.identity(batch_mean), tf.identity(batch_var)
+
+            mean, var = tf.cond(train_phase, mean_var_with_update,
+                                lambda: (ema.average(batch_mean), ema.average(batch_var)))
+            normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
+        return normed
+
+
     def _forward_pass(self, ):
         # 用户的向量表示
         with tf.name_scope('user_express'):
@@ -206,19 +227,15 @@ class Model(object):
                     [self.Usr_emb_deep, self.I_Wds_emb_deep, self.num_features] + self.I_one_hot_deep,
                     axis=1)  # [batch_size, input_dim]
                 self.deep_input = self.num_features
-                for deep_dim in self.deep_dims:
+                # 输入加入batch_norm
+                # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
+                for i, deep_dim in enumerate(self.deep_dims):
                     self.deep_input = tf.layers.dense(inputs=self.deep_input,
                                                       kernel_initializer=tf.glorot_uniform_initializer(),
                                                       units=deep_dim, activation=tf.nn.relu, )
-                    fc_mean, fc_var = tf.nn.moments(
-                        self.deep_input,
-                        axes=[0],  # 想要 normalize 的维度, [0] 代表 batch 维度
-                        # 如果是图像数据, 可以传入 [0, 1, 2], 相当于求[batch, height, width] 的均值/方差, 注意不要加入 channel 维度
-                    )
-                    scale = tf.Variable(tf.ones([deep_dim]))
-                    shift = tf.Variable(tf.zeros([deep_dim]))
-                    epsilon = 0.001
-                    self.deep_input = tf.nn.batch_normalization(self.deep_input, fc_mean, fc_var, shift, scale, epsilon)
+
+                    if i == 0:
+                        self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'deep_bn_{}'.format(i))
                     # 加入dropout
                     self.deep_input = tf.layers.dropout(inputs=self.deep_input, rate=self.dropout_deep)
                 self.deep_output = tf.layers.dense(self.deep_input, 1, activation=None)
@@ -373,7 +390,8 @@ class Model(object):
             self.one_hots_a: onehots,
             self.batch_size: user_ids.shape[0],
             self.num_features: num_features,
-            self.dropout_deep: self.drop_out_deep_on_train
+            self.dropout_deep: self.drop_out_deep_on_train,
+            self.train_phase: True,
         }
         # batch_size = self.sess.run([self.batch_size], feed_dict=feed_dict_)
         y, loss, _ = self.sess.run([self.y_ui_a, self.loss, self.optimizer], feed_dict=feed_dict_)
@@ -440,7 +458,8 @@ class Model(object):
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
-                self.dropout_deep: 0
+                self.dropout_deep: 0,
+                self.train_phase: False
 
             }
             self.val_datas[it] = [labels, item_words_indices, item_words_values, user_ids, onehots, num_features]
@@ -526,7 +545,8 @@ class Model(object):
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
-                self.dropout_deep: 0
+                self.dropout_deep: 0,
+                self.train_phase: False,
             }
             self.test_datas[it] = [item_words_indices, item_words_values, user_ids, onehots, num_features]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
@@ -535,4 +555,5 @@ class Model(object):
 
     def _save_preds(self, test_data, preds, save_path):
         test_data['preds'] = preds
-        test_data[['uid', 'pid', 'preds']].to_pickle(os.path.join(save_path, 'preds_log1.pkl'))
+        test_data[['uid', 'pid', 'preds']].to_pickle(os.path.join(save_path, 'deep_128_1bn.pkl'))
+
