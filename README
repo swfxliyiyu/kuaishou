@@ -1,8 +1,17 @@
 交互数据量 20800k
 用户量 15k
 词汇量 233243
+重复出现的词汇量 113605
 训练photo 4278686
 测试photo 895846
 2天数据
 训练时间 12日 3:00 - 13日 15:00
 测试时间 13日 15:00 - 14日 3:00
+
+
+跳板机：10.0.8.241/242
+IP: 172.20.20.21
+
+nohup srun --partition=TITANXP --mpi=pmi2 --gres=gpu:1 -n1 --ntasks-per-node=1 --job-name=FACE01 --kill-on-bad-exit=1 python -u network_user_emb.py >face01_log.txt 2>&1 &
+
+embedding 加relu

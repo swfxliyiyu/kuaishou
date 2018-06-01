@@ -8,8 +8,10 @@ from tensorflow.python.ops import random_ops
 
 
 class Model(object):
-    def __init__(self, num_user, num_recent_item, num_words, one_hots_dims, dim_k, att_dim_k, reg, att_reg, lr, prefix,
+    def __init__(self, num_user, num_recent_item, num_words, one_hots_dims, dim_k, att_dim_k, dim_hidden_out, reg,
+                 att_reg, lr, prefix,
                  dim_num_feat,
+                 user_emb_feat,
                  seed=1024,
                  use_deep=True, deep_dims=(256, 128, 64), checkpoint_path=None):
         self.att_reg = None
@@ -44,6 +46,8 @@ class Model(object):
         self.one_hots_dims = one_hots_dims
         self.use_deep = use_deep
         self.deep_dims = deep_dims
+        self.dim_hidden_out = dim_hidden_out
+        self.user_emb_feat = user_emb_feat
 
         self._build_graph()
 
@@ -83,6 +87,9 @@ class Model(object):
 
         self.train_phase = tf.placeholder(shape=[], dtype=tf.bool, name='train_phase')
 
+        # embedding的dropout
+        self.dropout_emb = tf.placeholder(shape=[], dtype=tf.float32, name='dropout_emb')
+
         # deep特征
         if self.use_deep:
             self.num_features = tf.placeholder(shape=[None, self.dim_num_feat], dtype=tf.float32,
@@ -90,8 +97,15 @@ class Model(object):
             self.dropout_deep = tf.placeholder(shape=[], dtype=tf.float32, name='dropout_deep')
 
     def _create_weights(self):
+
+        # Embedding
         self.Wu_Emb = tf.get_variable(shape=[self.num_user, self.dim_k], initializer=tf.glorot_uniform_initializer(),
                                       dtype=tf.float32, name='user_embedding')
+
+        self.user_emb_feat = tf.constant(self.user_emb_feat, dtype=tf.float32)
+
+        self.W_usr_feat_emb = tf.get_variable(shape=[128, self.dim_k], initializer=tf.glorot_uniform_initializer(),
+                                              dtype=tf.float32, name='user_feat_embedding')
 
         self.Wwords_Emb = tf.get_variable(shape=[self.num_words, self.dim_k],
                                           initializer=tf.glorot_uniform_initializer(),
@@ -104,10 +118,19 @@ class Model(object):
                                      dtype=tf.float32, name='one_hot_{}'.format(i))
             self.W_one_hots.append(W_temp)
 
+        self.W_Ctx = tf.get_variable(shape=[self.dim_num_feat, self.dim_k],
+                                     initializer=tf.glorot_uniform_initializer(),
+                                     dtype=tf.float32, name='context_embedding')
+
         # Item one-hot features attention
         self.Wu_oh_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
                                          initializer=tf.glorot_uniform_initializer(),
                                          dtype=tf.float32, name='user_attention')
+
+        self.Wctx_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
+                                        initializer=tf.glorot_uniform_initializer(),
+                                        dtype=tf.float32, name='context_attention')
+
         self.Woh_Att = []
         for i in range(len(self.one_hots_dims)):
             W_temp = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
@@ -131,10 +154,20 @@ class Model(object):
         self.bias_u = tf.get_variable(shape=[self.num_user, 1], initializer=tf.zeros_initializer(), dtype=tf.float32,
                                       name='bias_u')
 
-        self.params = [self.Wu_Emb, self.Wwords_Emb, self.bias_u, self.bias, self.b_oh_Att, self.w_oh_Att,
-                       self.c_oh_Att] + self.W_one_hots
+        # 点积的attention
+        self.W_in_prd_att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
+                                            initializer=tf.glorot_uniform_initializer(),
+                                            dtype=tf.float32, name='inner_product_attention_weight')
+        self.b_in_prd_att = tf.get_variable(shape=[self.att_dim_k], initializer=tf.zeros_initializer,
+                                            dtype=tf.float32, name='inner_product_att_bias')
+        self.w_in_prd_att = tf.get_variable(shape=[self.att_dim_k, 1], initializer=tf.glorot_uniform_initializer(),
+                                            dtype=tf.float32, name='inner_product_w')
 
-        self.att_params = [self.WW_Att, self.Wu_oh_Att, ] + self.Woh_Att
+        self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb, self.bias_u, self.bias,
+                       self.c_oh_Att + self.b_oh_Att + self.b_in_prd_att] + self.W_one_hots
+
+        self.att_params = [self.WW_Att, self.Wu_oh_Att, self.Wctx_Att, self.w_oh_Att,  self.w_in_prd_att,  self.W_in_prd_att,
+                           ] + self.Woh_Att
 
         # deep 参数
         if self.use_deep:
@@ -170,6 +203,15 @@ class Model(object):
             normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
         return normed
 
+    def _attentioned_layer(self, vectors):
+        atts = []
+        for vector in vectors:
+            att = tf.matmul(tf.nn.relu(tf.matmul(vector, self.W_in_prd_att) + self.b_in_prd_att), self.w_in_prd_att)
+            atts.append(att)
+        atts = tf.nn.softmax(tf.concat(atts, axis=1))
+        for i, vector in enumerate(vectors):
+            vectors[i] = vector * atts[:, i:i + 1]
+        return vectors
 
     def _forward_pass(self, ):
         # 用户的向量表示
@@ -177,22 +219,29 @@ class Model(object):
             # 用户隐向量
             self.Usr_Emb = tf.nn.embedding_lookup(self.Wu_Emb,
                                                   tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_k]
+            self.Usr_Feat = tf.nn.embedding_lookup(self.user_emb_feat,
+                                                   tf.cast(self.user_indices, tf.int32))  # [batch_size, 128]
 
-            self.Usr_Expr_a = self.Usr_Emb  # [batch_size, dim_k]
+            self.Usr_Feat_Emb = tf.matmul(self.Usr_Feat, self.W_usr_feat_emb)  # [batch_size, dim_k]
+
+            self.Usr_Expr_a = self.Usr_Emb + self.Usr_Feat_Emb  # [batch_size, dim_k]
+
+        # 环境的向量表示
+        with tf.name_scope('context_express'):
+            self.Ctx_Emb = tf.matmul(self.num_features, self.W_Ctx)  # [batch_size, dim_k]
+            self.Ctx_Emb = self._batch_norm_layer(self.Ctx_Emb, self.train_phase, 'ctx_bn')
 
         # 物品的向量表示
         with tf.name_scope('item_express'):
-            # self.I_Wds_a = tf.sparse_to_dense(sparse_indices=self.item_words_indices_a,
-            #                                   output_shape=[self.batch_size, self.num_words],
-            #                                   sparse_values=self.item_words_values_a)  # [batch_size, num_recent_item, num_words]
             self.I_Wds_a = tf.SparseTensor(indices=tf.cast(self.item_words_indices_a, dtype=np.int64),
                                            values=self.item_words_values_a,
                                            dense_shape=[tf.cast(self.batch_size, dtype=np.int64), self.num_words])
             self.att_u_a = tf.matmul(self.Usr_Emb, self.Wu_oh_Att)  # [batch_size, dim_k]
+            self.att_ctx = tf.matmul(self.Ctx_Emb, self.Wctx_Att)
             self.att_oh = []
             self.I_Wds_Emb_a = tf.sparse_tensor_dense_matmul(self.I_Wds_a, self.Wwords_Emb)  # [batch_size, dim_k]
             self.att_I_Wds = tf.matmul(self.I_Wds_Emb_a, self.WW_Att)  # 词的attention
-            self.att_I_Wds = tf.nn.relu(self.att_u_a + self.att_I_Wds + self.b_oh_Att)
+            self.att_I_Wds = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_Wds + self.b_oh_Att)
             self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_Wds)
             self.I_One_hot_a = []
@@ -201,7 +250,8 @@ class Model(object):
                                                       tf.cast(self.one_hots_a[:, i],
                                                               tf.int32))  # [batch_size, dim_k]
                 att_oh_temp = tf.matmul(I_Emb_temp_a, self.Woh_Att[i])  # [batch_size, att_dim_k]
-                att_temp = tf.nn.relu(self.att_u_a + att_oh_temp + self.b_oh_Att)  # [batch_size, att_dim_k]
+                att_temp = tf.nn.relu(
+                    self.att_u_a + self.att_ctx + att_oh_temp + self.b_oh_Att)  # [batch_size, att_dim_k]
                 att_temp = tf.matmul(att_temp, self.w_oh_Att) + self.c_oh_Att  # [batch_size, 1]
                 self.att_oh.append(att_temp)
                 self.I_One_hot_a.append(I_Emb_temp_a)
@@ -223,10 +273,10 @@ class Model(object):
                                                                                            tf.int32))  # [batch_size, dim_k]
                     self.I_one_hot_deep.append(I_Emb_temp_a)
 
-                self.deep_input = tf.concat(
-                    [self.Usr_emb_deep, self.I_Wds_emb_deep, self.num_features] + self.I_one_hot_deep,
-                    axis=1)  # [batch_size, input_dim]
-                # self.deep_input = self.num_features
+                # self.deep_input = tf.concat(
+                #     [self.Usr_emb_deep, self.I_Wds_emb_deep, self.num_features, self.Usr_Feat] + self.I_one_hot_deep,
+                #     axis=1)  # [batch_size, input_dim]
+                self.deep_input = tf.concat([self.num_features, self.Usr_Feat] + self.I_one_hot_deep, axis=1)
                 # 输入加入batch_norm
                 # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
@@ -235,24 +285,35 @@ class Model(object):
                                                       units=deep_dim, activation=tf.nn.relu, )
 
                     if i == 0:
-                        self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'deep_bn_{}'.format(i))
+                        self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase,
+                                                                 'deep_bn_{}'.format(i))
                     # 加入dropout
                     self.deep_input = tf.layers.dropout(inputs=self.deep_input, rate=self.dropout_deep)
                 self.deep_output = tf.layers.dense(self.deep_input, 1, activation=None)
                 self.deep_output = tf.reshape(self.deep_output, [-1])  # [batch_size]
 
-
         with tf.name_scope('output'):
-            self.cf_out = self.Item_Expr_a * self.Usr_Expr_a
+            self.cf_out = tf.layers.dropout(self.Item_Expr_a * self.Usr_Expr_a, rate=self.dropout_emb)
+            self.ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * self.Usr_Expr_a, rate=self.dropout_emb)
+            self.ctx_item_out = tf.layers.dropout(self.Ctx_Emb * self.Item_Expr_a, rate=self.dropout_emb)
+            # self.cf_out, self.ctx_usr_out, self.ctx_item_out = self._attentioned_layer(
+            #     [self.cf_out, self.ctx_usr_out, self.ctx_item_out])
+            # self.in_prd_out = tf.add_n([self.cf_out, self.ctx_usr_out, self.ctx_item_out])
+            # if self.use_deep:
+            #     self.concated = tf.concat([self.in_prd_out, self.deep_input], axis=1)
+            # else:
+            #     self.concated = tf.concat([self.in_prd_out], axis=1)
             if self.use_deep:
-                self.concated = tf.concat([self.cf_out, self.deep_input], axis=1)
+                self.concated = tf.concat([self.cf_out, self.ctx_usr_out, self.ctx_item_out, self.deep_input], axis=1)
             else:
-                self.concated = self.cf_out
+                self.concated = tf.concat([self.cf_out, self.ctx_usr_out, self.ctx_item_out], axis=1)
+
             self.hidden = tf.layers.dense(inputs=self.concated, kernel_initializer=tf.glorot_uniform_initializer(),
-                                          units=16, activation=tf.nn.relu)
+                                          units=self.dim_hidden_out, activation=tf.nn.relu)
             self.hidden = tf.layers.dropout(inputs=self.hidden, rate=self.dropout_deep)
-            self.y_ui_a = tf.layers.dense(self.hidden, 1, activation=tf.nn.sigmoid)
-            self.y_ui_a = tf.reshape(self.y_ui_a, [-1])
+            self.bu = tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32))
+            self.y_ui_a = tf.layers.dense(self.hidden, 1, activation=None) + self.bu
+            self.y_ui_a = tf.reshape(tf.nn.sigmoid(self.y_ui_a), [-1])
 
         # with tf.name_scope('output'):
         #     # 输出结果
@@ -385,6 +446,64 @@ class Model(object):
         values = np.ones([indices.shape[0]])
         return indices, values
 
+    def fit(self, input_data, batch_size=1024, epochs=50, validation_data=None, shuffle=True, initial_epoch=0,
+            min_display=50, max_iter=-1, drop_out_deep=0.5, drop_out_emb=0.6, save_path=None, test_data=None, ):
+
+        n_samples = get_sample_num(input_data)
+        iters = (n_samples - 1) // batch_size + 1
+        self.tr_loss_list = []
+        self.val_loss_list = []
+        self.drop_out_deep_on_train = drop_out_deep
+        self.drop_out_emb_on_train = drop_out_emb
+        print(iters, "steps per epoch")
+        print(batch_size, "samples per step")
+        start_time = time.time()
+        stop_flag = False
+        self.best_loss = np.inf
+        self.best_ckpt = None
+
+        for i in range(epochs):
+            if i < initial_epoch:
+                continue
+            if shuffle:
+                input_data = sklearn_shuffle(input_data, random_state=np.random.randint(2018))
+            for j in range(iters):
+                if isinstance(input_data, list):
+                    batch_x = [
+                        item[j * batch_size:(j + 1) * batch_size] for item in input_data]
+                elif isinstance(input_data, pd.DataFrame):
+                    batch_x = input_data.iloc[j * batch_size:(j + 1) * batch_size, :]
+                else:
+                    batch_x = input_data[j * batch_size:(j + 1) * batch_size]
+                loss = self.train_on_batch(
+                    batch_x)
+                if j % min_display == 0:
+                    tr_loss = loss
+                    self.tr_loss_list.append(tr_loss)
+                    total_time = time.time() - start_time
+                    if validation_data is None:
+                        print("Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} tr_time {3: 0.1f}".format(i, j, tr_loss,
+                                                                                                       total_time))
+                    else:
+                        val_loss = self.evaluate(validation_data)
+                        self.val_loss_list.append(val_loss)
+                        print(
+                            "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
+                                i, j, tr_loss, val_loss, total_time))
+
+                        if val_loss < self.best_loss:
+                            self.best_loss = val_loss
+                            if test_data is not None:
+                                self.preds = self.pred_prob(test_data)
+                            # self.save_model(self.checkpoint_path+'best')
+                # self.save_model(self.checkpoint_path)
+                if (i * iters) + j == max_iter:
+                    stop_flag = True
+                    break
+            self._save_preds(test_data, self.preds, save_path)
+            if stop_flag:
+                break
+
     def train_on_batch(self, input_data):  # fit a batch
         user_ids = input_data['user_indices'].as_matrix()
         labels = input_data['click'].as_matrix()
@@ -404,6 +523,7 @@ class Model(object):
             self.batch_size: user_ids.shape[0],
             self.num_features: num_features,
             self.dropout_deep: self.drop_out_deep_on_train,
+            self.dropout_emb: self.drop_out_emb_on_train,
             self.train_phase: True,
         }
         # batch_size = self.sess.run([self.batch_size], feed_dict=feed_dict_)
@@ -472,6 +592,7 @@ class Model(object):
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
                 self.dropout_deep: 0,
+                self.dropout_emb: 0,
                 self.train_phase: False
 
             }
@@ -480,63 +601,6 @@ class Model(object):
             labels_lst.extend(labels)
             preds_lst.extend(pred[0])
         return -self.scoreAUC(labels_lst, preds_lst)
-
-    def fit(self, input_data, batch_size=1024, epochs=50, validation_data=None, shuffle=True, initial_epoch=0,
-            min_display=50, max_iter=-1, drop_out_deep=0.5, save_path=None, test_data=None, ):
-
-        n_samples = get_sample_num(input_data)
-        iters = (n_samples - 1) // batch_size + 1
-        self.tr_loss_list = []
-        self.val_loss_list = []
-        self.drop_out_deep_on_train = drop_out_deep
-        print(iters, "steps per epoch")
-        print(batch_size, "samples per step")
-        start_time = time.time()
-        stop_flag = False
-        self.best_loss = np.inf
-        self.best_ckpt = None
-
-        for i in range(epochs):
-            if i < initial_epoch:
-                continue
-            if shuffle:
-                input_data = sklearn_shuffle(input_data, random_state=np.random.randint(2018))
-            for j in range(iters):
-                if isinstance(input_data, list):
-                    batch_x = [
-                        item[j * batch_size:(j + 1) * batch_size] for item in input_data]
-                elif isinstance(input_data, pd.DataFrame):
-                    batch_x = input_data.iloc[j * batch_size:(j + 1) * batch_size, :]
-                else:
-                    batch_x = input_data[j * batch_size:(j + 1) * batch_size]
-                loss = self.train_on_batch(
-                    batch_x)
-                if j % min_display == 0:
-                    tr_loss = loss
-                    self.tr_loss_list.append(tr_loss)
-                    total_time = time.time() - start_time
-                    if validation_data is None:
-                        print("Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} tr_time {3: 0.1f}".format(i, j, tr_loss,
-                                                                                                       total_time))
-                    else:
-                        val_loss = self.evaluate(validation_data)
-                        self.val_loss_list.append(val_loss)
-                        print(
-                            "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
-                                i, j, tr_loss, val_loss, total_time))
-
-                        if val_loss < self.best_loss:
-                            self.best_loss = val_loss
-                            if test_data is not None:
-                                self.preds = self.pred_prob(test_data)
-                            # self.save_model(self.checkpoint_path+'best')
-                # self.save_model(self.checkpoint_path)
-                if (i * iters) + j == max_iter:
-                    stop_flag = True
-                    break
-            self._save_preds(test_data, self.preds, save_path)
-            if stop_flag:
-                break
 
     def pred_prob(self, input_data):
         preds_lst = []
@@ -547,7 +611,7 @@ class Model(object):
                 user_ids = data['user_indices'].as_matrix()
                 onehots_1 = np.asarray(data['face_cols'].tolist())
                 # onehots_2 = data[[col for col in data if '_01' in col]].as_matrix()
-                onehots = np.concatenate([onehots_1,], axis=1)
+                onehots = np.concatenate([onehots_1, ], axis=1)
                 num_features = data[[col for col in data if '_N' in col]].as_matrix()
                 item_words_indices, item_words_values = self._item_words_indices_and_values(data)
             feed_dict_ = {
@@ -559,6 +623,7 @@ class Model(object):
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
                 self.dropout_deep: 0,
+                self.dropout_emb: 0,
                 self.train_phase: False,
             }
             self.test_datas[it] = [item_words_indices, item_words_values, user_ids, onehots, num_features]
@@ -568,5 +633,74 @@ class Model(object):
 
     def _save_preds(self, test_data, preds, save_path):
         test_data['preds'] = preds
-        test_data[['uid', 'pid', 'preds']].to_pickle(os.path.join(save_path, 'concat_deep_128.pkl'))
+        test_data[['uid', 'pid', 'preds']].to_pickle(os.path.join(save_path, 'deepmore_noatt_reg05_usremb_512.pkl'))
 
+
+if __name__ == '__main__':
+    user_embs = pd.read_pickle('../data/user_emb.pkl')
+    user_embs = user_embs.sort_values(['user_indices'])
+    user_embs = np.array(user_embs['user_emb'].tolist())
+    val_data = pd.read_pickle('../data/val_data.pkl')
+    train_data = pd.read_pickle('../data/train_data.pkl')
+    test_data = pd.read_pickle('../data/test_data.pkl')
+    one_hots_dims = []
+    face_cols = np.array(train_data['face_cols'].tolist())
+    one_hots_dims.extend((face_cols.max(axis=0) + 1))
+    # for col in val_data:
+    #     if '_01' in col:
+    #         one_hots_dims.append(train_data[col].max() + 1)
+    dim_num_feat = 0
+    for col in val_data:
+        if '_N' in col:
+            dim_num_feat += 1
+
+    print(one_hots_dims)
+    model_params = {
+        'num_user': 15141,
+        'num_recent_item': 30,
+        'num_words': 119637,
+        'dim_num_feat': dim_num_feat,
+        'one_hots_dims': one_hots_dims,
+        'dim_k': 64,
+        'att_dim_k': 16,
+        'dim_hidden_out': 16,
+        'reg': 0.0001,
+        'att_reg': 0.001,
+        'user_emb_feat': user_embs,
+        'lr': 0.002,
+        'prefix': None,
+        'seed': 1024,
+        'use_deep': True,
+        'deep_dims': (512, 256, 64, 32)
+    }
+    model = Model(**model_params)
+    model.compile(optimizer='adam')
+    # indices = pd.np.array([[1, 500], [1, 508]])
+    #
+    # feed_dict_ = {
+    #     model.user_indices: [1]*2048, model.item_words_indices_a: indices,
+    #     model.item_words_values_a: [1, 1],
+    #     model.recent_words_indices_a: [[1,2,1]],
+    #     model.recent_words_values_a: [1],
+    #     model.labels: [1]*2048,
+    #     model.one_hots_a: [[1,23,3]]*2048,
+    #     model.batch_size: 2048
+    # }
+    # a = model.sess.run([model.I_Wds_a], feed_dict=feed_dict_)
+    # print(pd.np.array(a)[0, 1:2, 507:509])
+    #
+    # print(a)
+    fit_params = {
+        'input_data': train_data,
+        'test_data': test_data,
+        'batch_size': 64,
+        'epochs': 50,
+        'drop_out_deep': 0.5,
+        'drop_out_emb': 0.6,
+        'validation_data': val_data, 'shuffle': True,
+        'initial_epoch': 0,
+        'min_display': 5000,
+        'max_iter': -1,
+        'save_path': '../model/'
+    }
+    model.fit(**fit_params)

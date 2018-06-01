@@ -9,9 +9,9 @@ if __name__ == '__main__':
     one_hots_dims = []
     face_cols = np.array(train_data['face_cols'].tolist())
     one_hots_dims.extend((face_cols.max(axis=0) + 1))
-    for col in val_data:
-        if '_01' in col:
-            one_hots_dims.append(train_data[col].max() + 1)
+    # for col in val_data:
+    #     if '_01' in col:
+    #         one_hots_dims.append(train_data[col].max() + 1)
     dim_num_feat = 0
     for col in val_data:
         if '_N' in col:
@@ -32,7 +32,7 @@ if __name__ == '__main__':
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
-        'deep_dims': (64, 32, 16)
+        'deep_dims': (512, 256, 64, 32)
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')
@@ -54,12 +54,12 @@ if __name__ == '__main__':
     fit_params = {
         'input_data': train_data,
         'test_data': test_data,
-        'batch_size': 16384,
+        'batch_size': 32768,
         'epochs': 50,
         'drop_out_deep': 0.5,
         'validation_data': val_data, 'shuffle': True,
         'initial_epoch': 0,
-        'min_display': 50,
+        'min_display': 10,
         'max_iter': -1,
         'save_path': '../model/'
     }

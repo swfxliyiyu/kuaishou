@@ -48,6 +48,7 @@ if __name__ == '__main__':
     df = pd.read_pickle('../data/interaction_features_1.pkl')
     print('loaded data...')
     print(df.columns)
+    del df['pids']
 
     # 添加连续特征
     time_redc = pd.read_pickle('../data/time_redc.pkl')
@@ -64,16 +65,16 @@ if __name__ == '__main__':
                 df2 = df2.drop(columns=[col])
         df = pd.merge(df, df2, how='left', on=['uid', 'pid'])
 
-    del df['pids']
     encoder = LabelEncoder()
     df['user_indices'] = encoder.fit_transform(df['uid'])
+    df['photo_indices'] = encoder.fit_transform(df['pid'])
     # face_cols = ['face_num', 'face_max_percent', 'face_whole_percent', 'face_male_num', 'face_famale_num',
     #              'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']
     df['hour_01'] = df['time'].apply(lambda t: time.strftime('%H', time.localtime(t // 1000))).astype('int')
     # # df['recent_words'] = df['recent_words'].apply(lambda lst: np.array(sorted(lst.tolist())))
     # df['recent_words'] = series_map(df['recent_words'], func)
     for col in df:
-        if '_01' in col:
+        if 'hour_01' in col:
             df[col] = encoder.fit_transform(df[col])
     tr_df = df[(df['is_test'] == False) & (df['is_val'] == False)]
     val_df = df[df['is_val'] == True]

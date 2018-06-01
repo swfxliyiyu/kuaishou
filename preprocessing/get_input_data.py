@@ -78,32 +78,60 @@ count = 0
 
 
 def handle_face(face):
-    columns = ['pid_01', 'face_num_01', 'face_max_percent_01', 'face_whole_percent_01', 'face_male_num_01',
-               'face_famale_num_01',
-               'face_gender_mix_01', 'face_ave_age_01', 'face_max_appear_01', 'face_min_appear_01',
-               'face_ave_appear_01']
+    columns = ['face_num_01', 'face_max_percent_01', 'face_whole_percent_01',
+               'face_male_num_01', 'face_famale_num_01', 'face_gender_mix_01',
+               'face_ave_age_01', 'face_max_age', 'face_min_age',
+               'face_max_appear_01', 'face_min_appear_01', 'face_ave_appear_01',
+               'famale_ave_appear', 'famale_max_appear', 'famale_min_appear',
+               'male_ave_appear', 'male_max_appear', 'male_min_appear',
+               'famale_max_percent', 'male_max_percent', 'famle_whole_percent', 'male_whole_percent',
+               'max_percent_appear', 'max_famale_percent_appear', 'max_male_percent_appear',
+               'famale_max_age', 'famale_min_age', 'famale_ave_age',
+               'male_max_age', 'male_min_age', 'male_ave_age',
+               ]
     total = face.shape[0]
 
     def get_face_property(x):
         faces = json.loads(x)
-        genders = [lst[1] for lst in faces]
+        male_faces = [lst for lst in faces if lst[1] == 0]
+        famale_faces = [lst for lst in faces if lst[1] == 1]
+        has_male = len(male_faces) > 0
+        has_famale = len(famale_faces) > 0
+        male_percents = [lst[0] for lst in male_faces]
+        famale_percents = [lst[0] for lst in famale_faces]
         percents = [lst[0] for lst in faces]
+        male_ages = [lst[2] for lst in male_faces]
+        famale_ages = [lst[2] for lst in famale_faces]
         ages = [lst[2] for lst in faces]
+        male_appears = [lst[3] for lst in male_faces]
+        famale_appears = [lst[3] for lst in famale_faces]
         appears = [lst[3] for lst in faces]
-        # res = {'face_num': len(faces), 'face_max_percent': int(np.max(percents) * 10),
-        #        'face_whole_percent': int(np.sum(percents) * 10),
-        #        'face_male_num': np.sum([g for g in genders if g == 0]),
-        #        'face_famale_num': np.sum([g for g in genders if g == 1]),
-        #        'face_gender_mix': 1 if (0 in genders and 1 in genders) else 0,
-        #        'face_ave_age': np.mean(ages) // 2,
-        #        'face_max_appear': np.max(appears) // 3,
-        #        'face_min_appear': np.min(appears) // 3,
-        #        'face_ave_appear': np.min(appears) // 3,
-        #        }
-        res = [len(faces), int(np.max(percents) * 10), int(np.sum(percents) * 10),
-               np.sum([g for g in genders if g == 0]), np.sum([g for g in genders if g == 1]),
-               1 if (0 in genders and 1 in genders) else 0, np.mean(ages) // 2, np.max(appears) // 3,
-               np.min(appears) // 3, np.mean(appears) // 3, ]
+
+        res = [len(faces), np.max(percents), np.sum(percents),
+               len(male_faces), len(famale_faces), 1 if (len(male_faces) > 0 and len(famale_faces) > 0) else 0,
+               np.mean(ages), np.max(ages), np.min(ages),
+               np.max(appears), np.min(appears), np.mean(appears),
+               np.max(famale_appears) if has_famale else 0,
+               np.min(famale_appears) if has_famale else 0,
+               np.mean(famale_appears) if has_famale else 0,
+               np.max(male_appears) if has_male else 0,
+               np.min(male_appears) if has_male else 0,
+               np.mean(male_appears) if has_male else 0,
+               np.max(famale_percents) if has_famale else 0,
+               np.max(male_percents) if has_male else 0,
+               np.sum(famale_percents) if has_famale else 0,
+               np.sum(male_percents) if has_male else 0,
+               appears[np.argmax(percents)],
+               famale_appears[np.argmax(famale_percents)] if has_famale else 0,
+               male_appears[np.argmin(male_percents)] if has_male else 0,
+               np.max(famale_ages) if has_famale else np.nan,
+               np.min(famale_ages) if has_famale else np.nan,
+               np.mean(famale_ages) if has_famale else np.nan,
+               np.max(male_ages) if has_male else np.nan,
+               np.min(male_ages) if has_male else np.nan,
+               np.mean(male_ages) if has_male else np.nan,
+
+               ]
         global count
         if count % 10000 == 0:
             print(count / total)
@@ -112,11 +140,20 @@ def handle_face(face):
 
     new_col = [get_face_property(x) for x in face['faces']]
     new_col = np.array(new_col)
+    new_col_01 = np.empty(new_col.shape)
+
+    inf_cols = set(np.arange(25, 31))
     for col in range(new_col.shape[1]):
-        encoder = LabelEncoder()
-        new_col[:, col] = encoder.fit_transform(new_col[:, col])
-    face = pd.DataFrame({'pid': face['pid'].tolist(), 'face_cols': new_col.tolist()})
-    face['face_cols'] = face['face_cols'].apply(lambda lst: np.asarray(lst))
+        print(columns[col])
+        data = new_col[:, col]
+        if col in inf_cols:
+            data[np.isnan(data)] = np.nanmean(data)
+        new_col[:, col] = data
+        print(pd.Series(data).drop_duplicates())
+        new_col_01[:, col] = pd.cut(data, 10, labels=np.arange(10))
+    face = pd.DataFrame({'pid': face['pid'].tolist(), 'face_cols_01': new_col_01.tolist(), 'face_cols_num': new_col.tolist()})
+    face['face_cols_01'] = face['face_cols_01'].apply(lambda lst: np.asarray(lst))
+    face['face_cols_num'] = face['face_cols_num'].apply(lambda lst: np.asarray(lst))
     print(face)
     return face
 
@@ -246,18 +283,16 @@ def yeild_udf(inter):
         yield df_u
 
 
-def get_val_set(df_u, val_rate):
-    pids = df_u['pid'].drop_duplicates().tolist()
-    pids = pids[int(len(pids) * (1 - val_rate)):]
-    pids = set(pids)
+def get_val_set(df_u, pids):
     df_u['index'] = df_u.index
     result = df_u['index'][[(x in pids) for x in df_u['pid']]]
     return result
 
 
 def parallel_get_val_set(data, val_rate):
+    val_pids = set(data['pid'].drop_duplicates().sample(frac=val_rate))
     lst = Parallel(n_jobs=12)(
-        delayed(get_val_set, val_rate)(df_u, val_rate) for df_u in yeild_udf(data))
+        delayed(get_val_set)(df_u, val_pids) for df_u in yeild_udf(data))
     result = pd.np.concatenate(lst)
     return result
 
@@ -276,18 +311,18 @@ if __name__ == '__main__':
     # inter = parallel_handle_inter(inter, recent_num=30)
     # inter.to_pickle('../data/recent_inter.pkl')
 
-    train_text = pd.read_pickle('../data/train_text.pkl')
-    test_text = pd.read_pickle('../data/test_text.pkl')
-    text = pd.concat([train_text, test_text])
-    text.columns = ['pid', 'text']
-    text = handle_text(text)
-    s = set()
-    for t in text['words']:
-        s.update(t.tolist())
-    print(text)
-    print(len(s))
-    print(max(list(s)))
-    text.to_pickle('../data/text_features.pkl')
+    # train_text = pd.read_pickle('../data/train_text.pkl')
+    # test_text = pd.read_pickle('../data/test_text.pkl')
+    # text = pd.concat([train_text, test_text])
+    # text.columns = ['pid', 'text']
+    # text = handle_text(text)
+    # s = set()
+    # for t in text['words']:
+    #     s.update(t.tolist())
+    # print(text)
+    # print(len(s))
+    # print(max(list(s)))
+    # text.to_pickle('../data/text_features.pkl')
 
     # train_face = pd.read_pickle('../data/train_face.pkl')
     # test_face = pd.read_pickle('../data/test_face.pkl')
@@ -306,21 +341,24 @@ if __name__ == '__main__':
 
     face = pd.read_pickle('../data/face_features.pkl')
     text = pd.read_pickle('../data/text_features.pkl')
-    text_vec = pd.read_pickle('../data/words_vec_features.pkl')
-    text = pd.merge(text, text_vec, on=['pid'])
+    # text_vec = pd.read_pickle('../data/words_vec_features.pkl')
+    # text = pd.merge(text, text_vec, on=['pid'])
     df = pd.merge(face, text, how='outer', on=['pid'])
     # for col in ['face_num', 'face_max_percent', 'face_whole_percent', 'face_male_num', 'face_famale_num',
     #             'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']:
     #     df[col] = df[col].fillna(0)
     empty = np.array([])
-    df['text'] = df['text'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
-    empty = np.zeros([10])
-    df['face_cols'] = df['face_cols'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
-    empty = np.zeros([128])
-    df['words_vec'] = df['words_vec'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    df['words'] = df['words'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    empty = np.zeros([31])
+    empty[28:31] = 8
+    df['face_cols_01'] = df['face_cols_01'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    empty = np.zeros([31])
+    empty[28:31] = 28
+    df['face_cols_num'] = df['face_cols_num'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    # empty = np.zeros([128])
+    # df['words_vec'] = df['words_vec'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
     print(df.sort_values(['pid']))
     df.to_pickle('../data/item_features.pkl')
-
 
     recent = pd.read_pickle('../data/recent_inter.pkl')
     recent.index = range(recent.shape[0])
@@ -336,7 +374,7 @@ if __name__ == '__main__':
     df = inter
     df.index = range(df.shape[0])
     print(df)
-    val_set = parallel_get_val_set(df[df['is_test'] == False], 0.1)
+    val_set = parallel_get_val_set(df[df['is_test'] == False], 0.05)
     # df = df.drop(index=val_set.index)
     df['is_val'] = False
     # df['is_val'] = False
