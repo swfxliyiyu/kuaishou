@@ -118,8 +118,6 @@ class Model(object):
         self.W_visual_emb = tf.get_variable(shape=[128, self.dim_k], initializer=tf.glorot_uniform_initializer(),
                                             dtype=tf.float32, name='visual_embedding')
 
-        self.visual_emb_feat = tf.constant(self.visual_emb_feat, dtype=tf.float32)
-
         self.W_one_hots = []
         for i in range(len(self.one_hots_dims)):
             W_temp = tf.get_variable(shape=[self.one_hots_dims[i], self.dim_k],
@@ -264,9 +262,10 @@ class Model(object):
             self.att_oh.append(self.att_I_Wds)
 
             self.I_visual_Emb = tf.matmul(self.visual_emb_feat, self.W_visual_emb)  # [batch_sie dim_k]
-            self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase, 'visual_bn') # [batch_sie dim_k]
+            self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase,
+                                                       'visual_bn')  # [batch_sie dim_k]
             self.att_I_visual = tf.matmul(self.I_visual_Emb, self.W_visual_Att)  # 图像的attention
-            self.att_I_visual = tf.nn.relu(self.att_u_a+self.att_ctx+self.att_I_visual, +self.b_oh_Att)
+            self.att_I_visual = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_visual + self.b_oh_Att)
             self.att_I_visual = tf.matmul(self.att_I_visual, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_visual)
 
@@ -285,7 +284,7 @@ class Model(object):
             self.I_Wds_Emb_a = self.I_Wds_Emb_a * self.att_oh[:, 0:1]
             self.I_visual_Emb = self.I_visual_Emb * self.att_oh[:, 1:2]
             for i in range(2, len(self.one_hots_dims) + 2):
-                self.I_One_hot_a[i - 1] = self.I_One_hot_a[i - 1] * self.att_oh[:, i:i + 1]
+                self.I_One_hot_a[i - 2] = self.I_One_hot_a[i - 2] * self.att_oh[:, i:i + 1]
             self.Item_Expr_a = tf.add_n(self.I_One_hot_a + [self.I_visual_Emb, self.I_Wds_Emb_a])
 
         with tf.name_scope('deep'):
@@ -302,7 +301,8 @@ class Model(object):
 
                 # self.deep_input = tf.concat([self.num_features, self.Usr_Feat, self.face_num, self.visual_emb_feat],
                 #                             axis=1)  # [batch_size, input_dim]
-                self.deep_input = tf.concat([self.num_features, self.Usr_Feat, self.visual_emb_feat] + self.I_one_hot_deep, axis=1)
+                self.deep_input = tf.concat(
+                    [self.num_features, self.Usr_Feat, self.visual_emb_feat] + self.I_one_hot_deep, axis=1)
                 # 输入加入batch_norm
                 # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
@@ -538,7 +538,7 @@ class Model(object):
         # onehots_2 = input_data[[col for col in input_data if '_01' in col]].as_matrix()
         onehots = np.concatenate([onehots_1], axis=1)
         item_words_indices, item_words_values = self._item_words_indices_and_values(input_data)
-        visual_emb_feat = input_data['visual'].as_matrix()
+        visual_emb_feat = np.array(input_data['visual'].tolist())
 
         # recent_words_indices, recent_words_values = self._recent_words_indices_and_values(input_data)
         num_features = input_data[[col for col in input_data if '_N' in col]].as_matrix()
@@ -611,7 +611,7 @@ class Model(object):
                     self.val_datas[it]
             else:
                 user_ids = data['user_indices'].as_matrix()
-                visual_emb_feat = input_data['visual'].as_matrix()
+                visual_emb_feat = np.array(data['visual'].tolist())
 
                 labels = data['click'].as_matrix()
                 onehots_1 = np.asarray(data['face_cols_01'].tolist())
@@ -654,8 +654,7 @@ class Model(object):
                         it]
             else:
                 user_ids = data['user_indices'].as_matrix()
-                visual_emb_feat = input_data['visual'].as_matrix()
-
+                visual_emb_feat = np.array(data['visual'].tolist())
                 onehots_1 = np.asarray(data['face_cols_01'].tolist())
                 # onehots_2 = data[[col for col in data if '_01' in col]].as_matrix()
                 onehots = np.concatenate([onehots_1, ], axis=1)
@@ -678,7 +677,8 @@ class Model(object):
                 self.dropout_emb: 0,
                 self.train_phase: False,
             }
-            self.test_datas[it] = [item_words_indices, item_words_values, user_ids, visual_emb_feat, onehots, num_features,
+            self.test_datas[it] = [item_words_indices, item_words_values, user_ids, visual_emb_feat, onehots,
+                                   num_features,
                                    face_cols_num]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
             preds_lst.extend(pred[0])
@@ -695,6 +695,7 @@ if __name__ == '__main__':
     user_embs = user_embs.sort_values(['user_indices'])
     user_embs = np.array(user_embs['user_emb'].tolist())
     visual_embs = pd.read_pickle('../data/visual_emb_features.pkl')
+    print(visual_embs)
     del visual_embs['photo_indices']
     # visual_embs = visual_embs.sort_values(['photo_indices'])
     # visual_embs = np.array(visual_embs['visual'].tolist())
@@ -702,9 +703,8 @@ if __name__ == '__main__':
     val_data = pd.read_pickle('../data/val_data.pkl')
     train_data = pd.read_pickle('../data/train_data.pkl')
     test_data = pd.read_pickle('../data/test_data.pkl')
-    for df in [train_data, test_data, val_data]:
-        df = pd.merge(df, visual_embs, 'left', 'pid')
 
+    train_data, test_data, val_data = [pd.merge(df, visual_embs, 'left', 'pid') for df in [train_data, test_data, val_data]]
     one_hots_dims = []
     face_cols = np.array(train_data['face_cols_01'].tolist())
     one_hots_dims.extend((face_cols.max(axis=0) + 1))
@@ -759,7 +759,8 @@ if __name__ == '__main__':
         'epochs': 50,
         'drop_out_deep': 0.5,
         'drop_out_emb': 0.5,
-        'validation_data': val_data, 'shuffle': True,
+        'validation_data': val_data,
+        'shuffle': True,
         'initial_epoch': 0,
         'min_display': 20,
         'max_iter': -1,
