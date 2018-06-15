@@ -2,6 +2,8 @@ import pandas as pd
 import tensorflow as tf
 import time
 import numpy as np
+
+from VAE_Encoder import VAE
 from utils import get_sample_num, new_variable_initializer, sklearn_shuffle
 import os
 from tensorflow.python.ops import random_ops
@@ -73,7 +75,7 @@ class Model(object):
         self.item_words_values_a = tf.placeholder(shape=[None], dtype=tf.float32,
                                                   name='item_words_values_a')  # [num_indices]
 
-        self.visual_emb_feat = tf.placeholder(shape=[None, 128], dtype=tf.float32,
+        self.visual_emb_feat = tf.placeholder(shape=[None, 2048], dtype=tf.float32,
                                               name='visual_features')
 
         self.recent_words_indices_a = tf.placeholder(shape=[None, 3], dtype=tf.float32,
@@ -115,8 +117,6 @@ class Model(object):
                                           initializer=tf.glorot_uniform_initializer(),
                                           dtype=tf.float32, name='words_embedding')
 
-        self.W_visual_emb = tf.get_variable(shape=[128, self.dim_k], initializer=tf.glorot_uniform_initializer(),
-                                            dtype=tf.float32, name='visual_embedding')
 
         self.W_one_hots = []
         for i in range(len(self.one_hots_dims)):
@@ -175,7 +175,7 @@ class Model(object):
         self.w_in_prd_att = tf.get_variable(shape=[self.att_dim_k, 1], initializer=tf.glorot_uniform_initializer(),
                                             dtype=tf.float32, name='inner_product_w')
 
-        self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_visual_emb, self.W_Ctx, self.W_usr_feat_emb, self.bias_u,
+        self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb, self.bias_u,
                        self.bias,
                        self.c_oh_Att + self.b_oh_Att + self.b_in_prd_att] + self.W_one_hots
 
@@ -268,10 +268,10 @@ class Model(object):
             self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_Wds)
 
-            self.I_visual_Emb = tf.matmul(self.visual_emb_feat, self.W_visual_emb)  # [batch_sie dim_k]
-            # self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase,
-            #                                            'visual_bn')  # [batch_sie dim_k]
-            self.I_visual_Emb = tf.nn.relu(self.I_visual_Emb)
+            vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=96, lam=0.001, kld_loss=0.001)
+            self.I_visual_Emb, self.vae_loss = vae_encoder.get_vae_embbeding(self.visual_emb_feat)
+            # TODO
+            self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase, 'vis_bn')
             # self.I_visual_Emb = tf.layers.dropout(self.I_visual_Emb, self.dropout_emb)
             self.att_I_visual = tf.matmul(self.I_visual_Emb, self.W_visual_Att)  # 图像的attention
             self.att_I_visual = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_visual + self.b_oh_Att)
@@ -311,7 +311,7 @@ class Model(object):
                 # self.deep_input = tf.concat([self.num_features, self.Usr_Feat, self.face_num, self.visual_emb_feat],
                 #                             axis=1)  # [batch_size, input_dim]
                 self.deep_input = tf.concat(
-                    [self.num_features, self.visual_emb_feat] + self.I_one_hot_deep, axis=1)
+                    [self.num_features, self.visual_emb_feat, self.Usr_emb_deep] + self.I_one_hot_deep, axis=1)
                 # 输入加入batch_norm
                 # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
@@ -374,6 +374,7 @@ class Model(object):
         for param in self.att_params:
             self.loss = tf.add(self.loss, self.att_reg * tf.nn.l2_loss(param))
             # self.optimizer = tf.train.AdamOptimizer(0.001).minimize(self.loss)
+        self.loss += self.vae_loss
 
     def _create_metrics(self, metric):
         """
@@ -698,16 +699,15 @@ class Model(object):
     def _save_preds(self, test_data, preds, save_path):
         test_data['preds'] = preds
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'deepout_reg001_visual_relu_512.pkl'))
+            os.path.join(save_path, 'usrembdeep_reg001_visual_relu_512.pkl'))
 
 
 if __name__ == '__main__':
     user_embs = pd.read_pickle('../data/user_emb.pkl')
     user_embs = user_embs.sort_values(['user_indices'])
     user_embs = np.array(user_embs['user_emb'].tolist())
-    visual_embs = pd.read_pickle('../data/visual_emb_features.pkl')
+    visual_embs = pd.read_pickle('../../kuaishou/data/visual_feature/visual_feature.pkl')
     print(visual_embs)
-    del visual_embs['photo_indices']
     # visual_embs = visual_embs.sort_values(['photo_indices'])
     # visual_embs = np.array(visual_embs['visual'].tolist())
 
@@ -737,7 +737,7 @@ if __name__ == '__main__':
         'one_hots_dims': one_hots_dims,
         'dim_k': 96,
         'att_dim_k': 16,
-        'dim_hidden_out': (64, 32, 16,),
+        'dim_hidden_out': (256, 128, 64, 32),
         'reg': 0.001,
         'att_reg': 0.1,
         'user_emb_feat': user_embs,
@@ -745,7 +745,7 @@ if __name__ == '__main__':
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
-        'deep_dims': (512, 256, 64, 32)
+        'deep_dims': (1024, 512, 256)
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')
