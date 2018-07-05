@@ -741,7 +741,7 @@ if __name__ == '__main__':
         'reg': 0.001,
         'att_reg': 0.1,
         'user_emb_feat': user_embs,
-        'lr': 0.002,
+        'lr': 0.001,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,

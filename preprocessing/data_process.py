@@ -209,4 +209,5 @@ if __name__ == '__main__':
     print(df_data)
     df_data.to_pickle('../../data/interaction_face_true_like_topic_10_data.pkl')
     print('data process finish')
-
+    import numpy as np
+    np.searchsorted()

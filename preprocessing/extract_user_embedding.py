@@ -1,3 +1,5 @@
+# coding=utf-8
+from __future__ import print_function, division
 import pandas as pd
 import tensorflow as tf
 import time
@@ -8,10 +10,9 @@ from tensorflow.python.ops import random_ops
 
 
 class Model(object):
-    def __init__(self, num_user, num_item, num_recent_item, num_words, one_hots_dims, dim_k, att_dim_k, dim_hidden_out,
+    def __init__(self, num_user, num_item, num_recent_item, num_words, dim_k, att_dim_k, dim_hidden_out,
                  reg,
                  att_reg, lr, prefix,
-                 dim_num_feat,
                  seed=1024,
                  use_deep=True, deep_dims=(256, 128, 64), checkpoint_path=None):
         self.att_reg = None
@@ -37,14 +38,12 @@ class Model(object):
         self.num_item = num_item
         self.num_history_item = num_recent_item
         self.num_words = num_words
-        self.dim_num_feat = dim_num_feat
         self.dim_k = dim_k
         self.att_dim_k = att_dim_k
         self.reg = reg
         self.att_reg = att_reg
         self.lr = lr
         self.prefix = prefix
-        self.one_hots_dims = one_hots_dims
         self.use_deep = use_deep
         self.deep_dims = deep_dims
         self.dim_hidden_out = dim_hidden_out
@@ -84,7 +83,7 @@ class Model(object):
         self.Wu_Emb = tf.get_variable(shape=[self.num_user, self.dim_k], initializer=tf.glorot_uniform_initializer(),
                                       dtype=tf.float32, name='user_embedding')
 
-        self.Wi_Emb = tf.get_variable(shape=[self.num_user, self.dim_k], initializer=tf.glorot_uniform_initializer(),
+        self.Wi_Emb = tf.get_variable(shape=[self.num_item, self.dim_k], initializer=tf.glorot_uniform_initializer(),
                                       dtype=tf.float32, name='item_embedding')
 
         self.bias = tf.get_variable(shape=[1], initializer=tf.zeros_initializer(), dtype=tf.float32, name='bias')
@@ -132,17 +131,19 @@ class Model(object):
 
         with tf.name_scope('output'):
             self.cf_out = tf.layers.dropout(self.Item_Emb * self.Usr_Expr_a, rate=self.dropout_emb)
-            self.concated = tf.concat([self.cf_out], axis=1)
+            self.cf_out = tf.layers.dense(self.cf_out, 1, use_bias=False,
+                                          kernel_initializer=tf.glorot_uniform_initializer())
+            # self.concated = tf.concat([self.cf_out], axis=1)
             # if self.use_deep:
             #     self.concated = tf.concat([self.cf_out, self.ctx_usr_out, self.ctx_item_out, self.deep_input], axis=1)
             # else:
             #     self.concated = tf.concat([self.cf_out, self.ctx_usr_out, self.ctx_item_out], axis=1)
-            self.hidden = tf.layers.dense(inputs=self.concated, kernel_initializer=tf.glorot_uniform_initializer(),
-                                          units=self.dim_hidden_out, activation=tf.nn.relu)
-            self.hidden = tf.layers.dropout(inputs=self.hidden, rate=self.dropout_deep)
+            # self.hidden = tf.layers.dense(inputs=self.concated, kernel_initializer=tf.glorot_uniform_initializer(),
+            #                               units=self.dim_hidden_out, activation=tf.nn.relu)
+            # self.hidden = tf.layers.dropout(inputs=self.hidden, rate=self.dropout_deep)
             self.bu = tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32))
             self.bi = tf.nn.embedding_lookup(self.bias_i, tf.cast(self.item_indices, dtype=tf.int32))
-            self.y_ui_a = tf.layers.dense(self.hidden, 1, activation=None) + self.bu + self.bi
+            self.y_ui_a = self.cf_out + self.bu + self.bi + self.bias
             self.y_ui_a = tf.reshape(tf.nn.sigmoid(self.y_ui_a), [-1])
 
         # with tf.name_scope('output'):
@@ -290,6 +291,7 @@ class Model(object):
                     if validation_data is None:
                         print("Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} tr_time {3: 0.1f}".format(i, j, tr_loss,
                                                                                                        total_time))
+                        # self.save_model(self.checkpoint_path+'best')
                     else:
                         val_loss = self.evaluate(validation_data)
                         self.val_loss_list.append(val_loss)
@@ -297,18 +299,18 @@ class Model(object):
                             "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
                                 i, j, tr_loss, val_loss, total_time))
 
-                        if val_loss < self.best_loss:
-                            self.best_loss = val_loss
-                            if test_data is not None:
-                                self.preds = self.pred_prob(test_data)
-                            # self.save_model(self.checkpoint_path+'best')
+                        self.best_loss = val_loss
+
+                        # self.save_model(self.checkpoint_path+'best')
                 # self.save_model(self.checkpoint_path)
                 if (i * iters) + j == max_iter:
                     stop_flag = True
                     break
+            self.preds = self.pred_prob(test_data)
             self._save_preds(test_data, self.preds, save_path)
             if stop_flag:
                 break
+
 
     def train_on_batch(self, input_data):  # fit a batch
         user_ids = input_data['user_indices'].as_matrix()
@@ -399,31 +401,24 @@ if __name__ == '__main__':
     val_data = pd.read_pickle('../data/val_data.pkl')
     train_data = pd.read_pickle('../data/train_data.pkl')
     test_data = train_data[['user_indices', 'uid']].drop_duplicates(['user_indices', 'uid'])
-    one_hots_dims = []
-    face_cols = np.array(train_data['face_cols_01'].tolist())
-    one_hots_dims.extend((face_cols.max(axis=0) + 1))
-    # for col in val_data:
-    #     if '_01' in col:
-    #         one_hots_dims.append(train_data[col].max() + 1)
-    dim_num_feat = 0
-    for col in val_data:
-        if '_N' in col:
-            dim_num_feat += 1
-
-    print(one_hots_dims)
+    data = pd.concat([train_data, val_data], ignore_index=True)
+    print('concat')
+    pid_cnts = data['pid'].value_counts()
+    weak_pid = set(pid_cnts[pid_cnts < 2].to_dict().keys())
+    val_data = data[[(x in weak_pid) for x in data['pid']]]
+    print('get val_data')
+    train_data = data.drop(index=val_data.index)
     model_params = {
         'num_user': 15141,
         'num_item': 4278686,
         'num_recent_item': 30,
         'num_words': 119637,
-        'dim_num_feat': dim_num_feat,
-        'one_hots_dims': one_hots_dims,
         'dim_k': 128,
         'att_dim_k': 16,
         'dim_hidden_out': 32,
-        'reg': 0.01,
-        'att_reg': 0.2,
-        'lr': 0.002,
+        'reg': 0.0015,
+        'att_reg': 0.1,
+        'lr': 0.0005,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
@@ -450,12 +445,12 @@ if __name__ == '__main__':
         'input_data': train_data,
         'test_data': test_data,
         'batch_size': 4096,
-        'epochs': 50,
-        'drop_out_deep': 0.5,
-        'drop_out_emb': 0.5,
-        'validation_data': val_data, 'shuffle': True,
+        'epochs': 3,
+        'drop_out_deep': 0.4,
+        'drop_out_emb': 0.4,
+        'validation_data': None, 'shuffle': True,
         'initial_epoch': 0,
-        'min_display': 10,
+        'min_display': 1000,
         'max_iter': -1,
         'save_path': '../model/'
     }

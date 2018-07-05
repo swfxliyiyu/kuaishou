@@ -6,7 +6,7 @@
  @File    : text_lda.py
  @Software: PyCharm
 '''
-
+from __future__ import print_function, division
 import pandas as pd
 import numpy as np
 import collections
@@ -16,9 +16,10 @@ from sklearn.decomposition import LatentDirichletAllocation
 
 def text_lda(max_iter, n_topics):
     print('text lda topic {}'.format(n_topics))
-    df_train_text = pd.read_csv('../../data/train/train_text.txt', header=None, names=['photo_id', 'text'], sep='\t')
-    df_test_text = pd.read_csv('../../data/test/test_text.txt', header=None, names=['photo_id', 'text'], sep='\t')
+    df_train_text = pd.read_pickle('../data/train_text.pkl')
+    df_test_text = pd.read_pickle('../data/test_text.pkl')
     df_text = pd.concat([df_train_text, df_test_text], axis=0, ignore_index=True)
+    df_text.columns = ['pid', 'text']
     print('num of photo_id', len(df_text))
     df_text = df_text.drop(index=df_text[df_text['text'] == '0'].index).reset_index()
     print('num of photo_id with text', len(df_text))
@@ -58,10 +59,12 @@ def text_lda(max_iter, n_topics):
     # print(docres)
     print(lda.perplexity(cntTf))
     # print(lda.components_)
-    column_names = ['topic_' + str(i) for i in range(1, n_topics+1)]
-    df_text_lda = pd.DataFrame(docres, columns=column_names)
-    df_text_lda['photo_id'] = df_text['photo_id']
-    df_text_lda.to_pickle('../../data/text_lda_{}.pkl'.format(n_topics))
+    # column_names = ['topic_' + str(i) for i in range(1, n_topics+1)]
+
+    df_text_lda = pd.DataFrame()
+    df_text_lda['topics'] = [np.asarray(lst) for lst in docres.tolist()]
+    df_text_lda['pid'] = df_text['pid']
+    df_text_lda.to_pickle('../data/text_lda_{}.pkl'.format(n_topics))
     print('doc size:', docres.shape)
     print(df_text.shape)
     print(df_text_lda)
@@ -69,5 +72,5 @@ def text_lda(max_iter, n_topics):
 
 if __name__ == '__main__':
 
-    text_lda(max_iter=1500, n_topics=10)
+    text_lda(max_iter=1500, n_topics=6)
     print('text lda finish')
