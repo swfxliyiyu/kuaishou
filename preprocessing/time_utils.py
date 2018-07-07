@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-from __future__ import print_function, division
 import time
 from collections import defaultdict
 
@@ -32,26 +31,25 @@ def yield_uid(df_data):
     temp.index = range(temp.shape[0])
     index = 0
     last_uid = temp.loc[0, 'user_id']
-    for i, row in temp.iterrows():
-        if row['user_id'] != last_uid:
-            print(row)
-            print('===========', index / total, last_uid)
-            yield temp.loc[index:i - 1, :]
+    for i in temp.index:
+        if temp.iloc[i, 0] != last_uid:
+            print(temp.iloc[i])
+            print('===========', index / total, last_uid, index, i)
+            yield temp.iloc[index:i, :]
             print('yield', index, i - 1)
             index = i
-            last_uid = row['user_id']
-    yield temp.loc[index:, :]
+            last_uid = temp.iloc[i, 0]
+    yield temp.iloc[index:, :]
     print('finished yield')
-
 
 def handle_uid(df_uid):
     df_uid['start_time'] = df_uid['realtime'] - pd.Timedelta(minutes=8)
     df_uid['end_time'] = df_uid['realtime'] + pd.Timedelta(minutes=8)
     df_uid['start_index'] = df_uid[['start_time']].apply(
-        lambda x: np.searchsorted(df_uid['realtime'], x['start_time']), axis=1).iloc[:, 0]
+        lambda x: np.searchsorted(df_uid['realtime'], x['start_time'])[0], axis=1, result_type='reduce')
     df_uid['now_index'] = range(df_uid.shape[0])
     df_uid['end_index'] = df_uid[['end_time']].apply(
-        lambda x: np.searchsorted(df_uid['realtime'], x['end_time']), axis=1).iloc[:, 0]
+        lambda x: np.searchsorted(df_uid['realtime'], x['end_time'])[0], axis=1, result_type='reduce')
     df_uid['user_pre8min_cnt'] = df_uid['now_index'] - df_uid['start_index']
     df_uid['user_aft8min_cnt'] = df_uid['end_index'] - df_uid['now_index']
     return df_uid[['user_id', 'photo_id', 'user_pre8min_cnt', 'user_aft8min_cnt']]
@@ -80,13 +78,13 @@ def user_cnt_pre8min(df_data):
     temp['right_index'] = right
 
     temp['start_index'] = temp[['left_index', 'right_index', 'start_time']].apply(
-        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time']),
-        axis=1).iloc[:, 0]
+        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time'])[0],
+        axis=1, result_type='reduce')
     temp['now_index'] = range(temp.shape[0])
     temp['user_pre8min_cnt'] = temp['now_index'] - temp['start_index']
     temp['end_index'] = temp[['left_index', 'right_index', 'end_time']].apply(
-        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['end_time']),
-        axis=1).iloc[:, 0]
+        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['end_time'])[0],
+        axis=1, result_type='reduce')
     temp['user_aft8min_cnt'] = temp['end_index'] - temp['now_index']
     temp = temp.drop(columns=['start_time', 'left_index', 'right_index', 'start_index', 'now_index', 'end_index'])
     df_data = pd.merge(df_data, temp, 'left', on=['user_id', 'photo_id', 'realtime'])
@@ -97,7 +95,7 @@ def user_cnt_pre8min(df_data):
 def user_batch_cnt_pre8min(df_data):
     def get_index(x):
         try:
-            index = x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time'])
+            index = x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time'])[0]
         except Exception as e:
             print(e)
             print(x)
@@ -113,13 +111,13 @@ def user_batch_cnt_pre8min(df_data):
                                                                                             side='right')
     # temp['start_index'] = temp[['left_index', 'right_index', 'start_time']].apply(
     #     lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time']), axis=1,
-    #     reduce=True)
-    temp['start_index'] = temp[['left_index', 'right_index', 'start_time']].apply(get_index, axis=1).iloc[:, 0]
+    #     result_type='reduce')
+    temp['start_index'] = temp[['left_index', 'right_index', 'start_time']].apply(get_index, axis=1, result_type='reduce')
     temp['now_index'] = range(temp.shape[0])
     temp['user_batch_cnt_pre8min'] = temp['now_index'] - temp['start_index']
     temp['end_index'] = temp[['left_index', 'right_index', 'end_time']].apply(
-        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['end_time']),
-        axis=1).iloc[:, 0]
+        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['end_time'])[0],
+        axis=1, result_type='reduce')
     temp['user_batch_cnt_aft8min'] = temp['end_index'] - temp['now_index']
     temp = temp.drop(columns=['start_time', 'left_index', 'right_index', 'start_index', 'end_index', 'now_index'])
     del temp['photo_id']
@@ -134,20 +132,19 @@ def yield_pid(df_data):
     temp.index = range(temp.shape[0])
     index = 0
     cnt = 0
-    last_pid = temp.loc[0, 'photo_id']
-    for i, row in temp.iterrows():
-        if row['photo_id'] != last_pid:
+    last_pid = temp.iloc[0, 1]
+    for i in temp.index:
+        if temp.iloc[i, 1] != last_pid:
             cnt += 1
             if cnt % 2000 == 0:
-                print(row)
                 print('===========', index / total, last_pid)
             if i - 1 > index:
-                yield temp.loc[index:i - 1, :]
+                yield temp.iloc[index:i, :]
                 if cnt % 2000 == 0:
                     print('yield', index, i - 1)
             index = i
-            last_pid = row['photo_id']
-    yield temp.loc[index:, :]
+            last_pid = temp.iloc[i, 1]
+    yield temp.iloc[index:, :]
     print('finished yield')
 
 
@@ -155,10 +152,10 @@ def handle_pid(df_p):
     df_p['start_time'] = df_p['realtime'] - pd.Timedelta(days=0.5)
     df_p['end_time'] = df_p['realtime'] + pd.Timedelta(days=0.5)
     df_p['start_index'] = df_p[['start_time']].apply(
-        lambda x: np.searchsorted(df_p['realtime'], x['start_time']), axis=1).iloc[:, 0]
+        lambda x: np.searchsorted(df_p['realtime'], x['start_time'])[0], axis=1, result_type='reduce')
     df_p['now_index'] = range(df_p.shape[0])
     df_p['end_index'] = df_p[['end_time']].apply(
-        lambda x: np.searchsorted(df_p['realtime'], x['end_time']), axis=1).iloc[:, 0]
+        lambda x: np.searchsorted(df_p['realtime'], x['end_time'])[0], axis=1, result_type='reduce')
     df_p['photo_batch_cnt_pre1day'] = df_p['now_index'] - df_p['start_index']
     df_p['photo_batch_cnt_aft1day'] = df_p['end_index'] - df_p['now_index']
     return df_p[['user_id', 'photo_id', 'photo_batch_cnt_pre1day', 'photo_batch_cnt_aft1day']]
@@ -185,13 +182,13 @@ def photo_batch_cnt_pre8min(df_data):
                                                                                             side='right')
 
     temp['start_index'] = temp[['left_index', 'right_index', 'start_time']].apply(
-        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time']),
-        axis=1, ).iloc[:, 0]
+        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['start_time'])[0],
+        axis=1, result_type='reduce')
     temp['now_index'] = range(temp.shape[0])
     temp['photo_batch_cnt_pre8min'] = temp['now_index'] - temp['start_index']
     temp['end_index'] = temp[['left_index', 'right_index', 'end_time']].apply(
-        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['end_time']),
-        axis=1, ).iloc[:, 0]
+        lambda x: x['left_index'] + np.searchsorted(temp.realtime[x['left_index']:x['right_index']], x['end_time'])[0],
+        axis=1, result_type='reduce')
     temp['photo_batch_cnt_aft8min'] = temp['end_index'] - temp['now_index']
     temp = temp.drop(columns=['start_time', 'left_index', 'right_index', 'start_index', 'end_index', 'now_index'])
     df_data = pd.merge(df_data, temp, 'left', on=['user_id', 'photo_id', 'realtime'])
@@ -335,30 +332,31 @@ if __name__ == '__main__':
     train_inter.columns = ['user_id', 'photo_id', 'click', 'like', 'follow', 'time', 'playing_time', 'duration_time']
     test_inter = pd.read_pickle('../data/test_interaction.pkl')
     test_inter.columns = ['user_id', 'photo_id', 'time', 'duration_time']
-    inter = pd.concat([train_inter, test_inter], ignore_index=True)
-    inter.drop(columns=['click', 'like', 'follow', 'playing_time', 'duration_time'])
+    inter = pd.concat([train_inter, test_inter], ignore_index=True, sort=False)
+    inter = inter.drop(columns=['like', 'follow', 'playing_time', 'duration_time'])
     inter = trans_time(inter)
 
-    # inter = parallel_user_cnt_pre8min(inter)
-    # inter[['user_id','photo_id','user_pre8min_cnt','user_aft8min_cnt']].to_pickle('../data/user_cnt_pre8min.pkl')
+    inter = parallel_user_cnt_pre8min(inter)
+    inter[['user_id','photo_id','user_pre8min_cnt','user_aft8min_cnt']].to_pickle('../data/context_feature/user_cnt_pre8min.pkl')
 
-    # inter = user_batch_cnt_pre8min(inter)
-    # inter[['user_id','photo_id','user_batch_cnt_pre8min','user_batch_cnt_aft8min']].to_pickle('../data/user_batch_cnt_pre8min.pkl')
+    inter = user_batch_cnt_pre8min(inter)
+    inter[['user_id','photo_id','user_batch_cnt_pre8min','user_batch_cnt_aft8min']].to_pickle('../data/context_feature/user_batch_cnt_pre8min.pkl')
 
-    # inter = parallel_photo_batch_cnt_pre1day(inter)
-    # inter[['user_id','photo_id','photo_batch_cnt_pre1day','photo_batch_cnt_aft1day']].to_pickle('../data/photo_batch_cnt_pre1day.pkl')
+    inter = parallel_photo_batch_cnt_pre1day(inter)
+    inter[['user_id','photo_id','photo_batch_cnt_pre1day','photo_batch_cnt_aft1day']].to_pickle('../data/context_feature/photo_batch_cnt_pre1day.pkl')
 
-    # inter = next_time_diff(inter)
-    # inter[['user_id', 'photo_id', 'next_time_diff']].to_pickle(
-    #     '../data/next_time_diff.pkl')
-    #
-    # inter = pre_time_diff(inter)
-    # inter[['user_id', 'photo_id', 'pre_time_diff']].to_pickle(
-    #     '../data/pre_time_diff.pkl')
+    inter = next_time_diff(inter)
+    inter[['user_id', 'photo_id', 'next_time_diff']].to_pickle(
+        '../data/context_feature/next_time_diff.pkl')
 
-    # inter = user_photo_total_cnt(inter)
-    # inter[['user_id', 'photo_id', 'photo_total_cnt', 'user_total_cnt', 'user_total_batch_cnt']].to_pickle(
-    #     '../data/user_photo_total_cnt.pkl')
+    inter = pre_time_diff(inter)
+    inter[['user_id', 'photo_id', 'pre_time_diff']].to_pickle(
+        '../data/context_feature/pre_time_diff.pkl')
+
+    inter = user_photo_total_cnt(inter)
+    inter[['user_id', 'photo_id', 'photo_total_cnt', 'user_total_cnt', 'user_total_batch_cnt']].to_pickle(
+        '../data/context_feature/user_photo_total_cnt.pkl')
 
     inter = cal_batch_photo_cnt(inter)
     inter[['user_id', 'photo_id', 'batch_photo_cnt']].to_pickle('../data/context_feature/batch_photo_cnt.pkl')
+
