@@ -44,11 +44,14 @@ def func3(lst):
     return np.asarray(sorted(lst.tolist()))
 
 def get_user_like(data):
-    features = [np.array(feat.tolist()) for feat in [data['context'], data['face_cols_num'], data['topics']]]
-    data['concated_feature'] = [np.array(lst) for lst in np.concatenate(features, axis=1).tolist()]
-    user_like_mean = [[uid, np.array(value['concated_feature'].tolist()).mean(axis=0)] for uid, value in data.groupby(['uid'])]
+
+    temp = data[data['click'] == 1]
+    features = [np.array(feat.tolist()) for feat in [temp['face_cols_num'], temp['topics']]]
+    features.append(temp[[col for col in temp if 'ctx_' in col and '01_' not in col]].values)
+    temp['concated_feature'] = [np.array(lst) for lst in np.concatenate(features, axis=1).tolist()]
+    user_like_mean = [[uid, np.array(value['concated_feature'].tolist()).mean(axis=0).astype(np.float32)] for uid, value in temp.groupby(['uid'])]
     user_like_mean = pd.DataFrame(user_like_mean, columns=['uid', 'user_like_mean'])
-    del data['concated_feature']
+    del temp['concated_feature']
     data = pd.merge(data, user_like_mean, 'left', ['uid'])
     return data
 
@@ -66,7 +69,7 @@ if __name__ == '__main__':
     # 添加text_lda
     df_text_lda = pd.read_pickle('../data/text_lda_6.pkl')
     df = pd.merge(df, df_text_lda, 'left', on=['pid'])
-    empty = np.zeros(shape=[6])
+    empty = np.zeros(shape=[6], dtype=np.float32)
     df['topics'] = df['topics'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
     print('text lda concated...')
 
@@ -79,10 +82,11 @@ if __name__ == '__main__':
     encoder = LabelEncoder()
     df['user_indices'] = encoder.fit_transform(df['uid'])
     df['photo_indices'] = encoder.fit_transform(df['pid'])
-    # df['hour_01'] = df['time'].apply(lambda t: time.strftime('%H', time.localtime(t // 1000))).astype('int')
-    # for col in df:
-    #     if 'hour_01' in col:
-    #         df[col] = encoder.fit_transform(df[col])
+    df['ctx_01_hour'] = df['time'].apply(lambda t: time.strftime('%H', time.localtime(t // 1000))).astype('int')
+    for col in df:
+        if 'ctx_01_hour' in col:
+            df[col] = encoder.fit_transform(df[col])
+            df[col] = df[col].astype(np.int8)
     tr_df = df[(df['is_test'] == False) & (df['is_val'] == False)]
     val_df = df[df['is_val'] == True]
     te_df = df[df['is_test'] == True]

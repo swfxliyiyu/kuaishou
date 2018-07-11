@@ -1,12 +1,11 @@
 import os
-
 import pandas as pd
 
 dir_path = '../data'
-
 if __name__ == '__main__':
     file_lst = os.listdir(dir_path)
     for file_name in file_lst:
+        print(file_name)
         prefix, suffix = file_name.split('.')
         if suffix == 'txt':
             pkl_name = '.'.join([prefix, 'pkl'])

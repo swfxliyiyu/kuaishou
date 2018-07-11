@@ -1,5 +1,7 @@
 # coding=utf-8
 from __future__ import print_function, division
+from tensorflow.python import debug as tf_debug
+
 import pandas as pd
 import tensorflow as tf
 import time
@@ -24,6 +26,8 @@ class Model(object):
         self.graph = tf.Graph()
         self.sess = tf.Session(graph=self.graph, config=tf.ConfigProto(
             allow_soft_placement=True, log_device_placement=False))
+
+        # self.sess = tf_debug.LocalCLIDebugWrapperSession(self.sess)
 
         with self.graph.as_default():
             tf.set_random_seed(self.seed)  # 设置随机种子
@@ -66,7 +70,8 @@ class Model(object):
 
         self.user_indices = tf.placeholder(shape=[None], dtype=tf.float32, name='user_indices')  # [batch_size]
 
-        self.item_indices = tf.placeholder(shape=[None], dtype=tf.float32, name='item_indices')
+        with tf.device('/cpu:0'):
+            self.item_indices = tf.placeholder(shape=[None], dtype=tf.float32, name='item_indices')
 
         self.batch_size = tf.placeholder(shape=[], dtype=tf.int32, name='batch_size')  # num of batch size
 
@@ -82,9 +87,10 @@ class Model(object):
         # Embedding
         self.Wu_Emb = tf.get_variable(shape=[self.num_user, self.dim_k], initializer=tf.glorot_uniform_initializer(),
                                       dtype=tf.float32, name='user_embedding')
-
-        self.Wi_Emb = tf.get_variable(shape=[self.num_item, self.dim_k], initializer=tf.glorot_uniform_initializer(),
-                                      dtype=tf.float32, name='item_embedding')
+        with tf.device('/cpu:0'):
+            self.Wi_Emb = tf.get_variable(shape=[self.num_item, self.dim_k],
+                                          initializer=tf.glorot_uniform_initializer(),
+                                          dtype=tf.float32, name='item_embedding')
 
         self.bias = tf.get_variable(shape=[1], initializer=tf.zeros_initializer(), dtype=tf.float32, name='bias')
 
@@ -93,8 +99,6 @@ class Model(object):
 
         self.bias_i = tf.get_variable(shape=[self.num_item, 1], initializer=tf.zeros_initializer(), dtype=tf.float32,
                                       name='bias_i')
-
-        self.params = [self.Wu_Emb, self.Wi_Emb, self.bias_u, self.bias, self.bias_i]
 
         # self.in_prd_params = [self.W_in_prd]
 
@@ -125,7 +129,7 @@ class Model(object):
 
             self.Usr_Expr_a = self.Usr_Emb  # [batch_size, dim_k]
 
-        with tf.name_scope('item_express'):
+        with tf.name_scope('item_express'), tf.device('/cpu:0'):
             self.Item_Emb = tf.nn.embedding_lookup(self.Wi_Emb,
                                                    tf.cast(self.item_indices, tf.int32))  # [batch_size, dim_k
 
@@ -145,7 +149,7 @@ class Model(object):
             self.bi = tf.nn.embedding_lookup(self.bias_i, tf.cast(self.item_indices, dtype=tf.int32))
             self.y_ui_a = self.cf_out + self.bu + self.bi + self.bias
             self.y_ui_a = tf.reshape(tf.nn.sigmoid(self.y_ui_a), [-1])
-
+            # self.y_ui_a = tf.reshape(self.y_ui_a, [-1])
         # with tf.name_scope('output'):
         #     # 输出结果
         #     self.y_ui_a = tf.reduce_sum(self.Item_Expr_a * self.Usr_Expr_a, axis=1)
@@ -160,12 +164,13 @@ class Model(object):
 
     def _create_loss(self):
         self.loss = tf.keras.losses.categorical_crossentropy(self.labels, self.y_ui_a)
-        # self.loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(
+        # self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
         #     labels=self.labels, logits=self.y_ui_a))
         # 正则项
+        self.params = [self.Usr_Emb, self.Item_Emb, self.bu, self.bi, self.bias]
         for param in self.params:
             self.loss = tf.add(self.loss, self.reg * tf.nn.l2_loss(param))
-        # self.optimizer = tf.train.AdamOptimizer(0.001).minimize(self.loss)
+
 
     def _create_metrics(self, metric):
         """
@@ -273,7 +278,8 @@ class Model(object):
             if i < initial_epoch:
                 continue
             if shuffle:
-                input_data = sklearn_shuffle(input_data, random_state=np.random.randint(2018))
+                # input_data = sklearn_shuffle(input_data, random_state=np.random.randint(2018))
+                input_data = input_data.sample(frac=1)
             for j in range(iters):
                 if isinstance(input_data, list):
                     batch_x = [
@@ -311,11 +317,10 @@ class Model(object):
             if stop_flag:
                 break
 
-
     def train_on_batch(self, input_data):  # fit a batch
-        user_ids = input_data['user_indices'].as_matrix()
-        item_ids = input_data['photo_indices'].as_matrix()
-        labels = input_data['click'].as_matrix()
+        user_ids = input_data['user_indices'].values
+        item_ids = input_data['photo_indices'].values
+        labels = input_data['click'].values
         feed_dict_ = {
             self.user_indices: user_ids,
             self.item_indices: item_ids,
@@ -326,7 +331,7 @@ class Model(object):
             self.train_phase: True,
         }
         # batch_size = self.sess.run([self.batch_size], feed_dict=feed_dict_)
-        y, loss, _ = self.sess.run([self.y_ui_a, self.loss, self.optimizer], feed_dict=feed_dict_)
+        loss, _ = self.sess.run([self.loss, self.optimizer], feed_dict=feed_dict_)
         return loss
 
     def scoreAUC(self, labels, probs):
@@ -369,9 +374,9 @@ class Model(object):
             if it in self.val_datas:
                 labels, user_ids, item_ids = self.val_datas[it]
             else:
-                user_ids = data['user_indices'].as_matrix()
-                item_ids = data['photo_indices'].as_matrix()
-                labels = data['click'].as_matrix()
+                user_ids = data['user_indices'].values
+                item_ids = data['photo_indices'].values
+                labels = data['click'].values
             feed_dict_ = {
                 self.user_indices: user_ids,
                 self.item_indices: item_ids,
@@ -393,7 +398,7 @@ class Model(object):
         return user_embs
 
     def _save_preds(self, test_data, preds, save_path):
-        test_data['user_emb'] = [np.asarray(emb) for emb in preds]
+        test_data['user_emb'] = [np.asarray(emb, np.float32) for emb in preds]
         test_data[['uid', 'user_indices', 'user_emb']].to_pickle(os.path.join(save_path, 'user_emb.pkl'))
 
 
@@ -409,16 +414,16 @@ if __name__ == '__main__':
     print('get val_data')
     train_data = data.drop(index=val_data.index)
     model_params = {
-        'num_user': 15141,
-        'num_item': 4278686,
+        'num_user': 37821,
+        'num_item': 9204230,
         'num_recent_item': 30,
-        'num_words': 119637,
-        'dim_k': 128,
+        'num_words': 152092,
+        'dim_k': 96,
         'att_dim_k': 16,
         'dim_hidden_out': 32,
-        'reg': 0.0015,
-        'att_reg': 0.1,
-        'lr': 0.0005,
+        'reg': 0.003,
+        'att_reg': 0.2,
+        'lr': 0.00025,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
@@ -444,13 +449,14 @@ if __name__ == '__main__':
     fit_params = {
         'input_data': train_data,
         'test_data': test_data,
-        'batch_size': 4096,
+        'batch_size': 8192,
         'epochs': 3,
         'drop_out_deep': 0.4,
         'drop_out_emb': 0.4,
-        'validation_data': None, 'shuffle': True,
+        'validation_data': None,
+        'shuffle': True,
         'initial_epoch': 0,
-        'min_display': 1000,
+        'min_display': 10,
         'max_iter': -1,
         'save_path': '../model/'
     }

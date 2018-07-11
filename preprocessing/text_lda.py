@@ -62,7 +62,7 @@ def text_lda(max_iter, n_topics):
     # column_names = ['topic_' + str(i) for i in range(1, n_topics+1)]
 
     df_text_lda = pd.DataFrame()
-    df_text_lda['topics'] = [np.asarray(lst) for lst in docres.tolist()]
+    df_text_lda['topics'] = [np.asarray(lst, dtype=np.float32) for lst in docres.tolist()]
     df_text_lda['pid'] = df_text['pid']
     df_text_lda.to_pickle('../data/text_lda_{}.pkl'.format(n_topics))
     print('doc size:', docres.shape)

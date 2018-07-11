@@ -1,5 +1,3 @@
-# coding=utf-8
-from __future__ import print_function, division
 import pandas as pd
 import json
 import numpy as np
@@ -25,7 +23,7 @@ def handle_text(text):
     print('after filtering', len(dic_count))
     dic_count = set(dic_count.index)
     print(dic_count)
-    empty = np.array([])
+    empty = np.array([], dtype=np.int32)
 
     def func(x):
         x = int(x)
@@ -43,11 +41,10 @@ def handle_text(text):
         if not lst:
             return empty
         else:
-            return np.sort(lst)
+            return np.asarray(np.sort(lst), dtype=np.int32)
 
     text['words'] = text['text'].apply(split_text)
     del text['text']
-    print(text)
     return text
 
 
@@ -153,8 +150,8 @@ def handle_face(face):
         print(pd.Series(data).drop_duplicates())
         new_col_01[:, col] = pd.cut(data, 10, labels=np.arange(10))
     face = pd.DataFrame({'pid': face['pid'].tolist(), 'face_cols_01': new_col_01.tolist(), 'face_cols_num': new_col.tolist()})
-    face['face_cols_01'] = face['face_cols_01'].apply(lambda lst: np.asarray(lst))
-    face['face_cols_num'] = face['face_cols_num'].apply(lambda lst: np.asarray(lst))
+    face['face_cols_01'] = face['face_cols_01'].apply(lambda lst: np.asarray(lst, np.int8))
+    face['face_cols_num'] = face['face_cols_num'].apply(lambda lst: np.asarray(lst, np.float32))
     print(face)
     return face
 
@@ -313,6 +310,14 @@ def parallel_get_val_set(data, val_rate):
     return result
 
 
+def cast_inter(data):
+    data['uid'] = data['uid'].astype('int32')
+    data['pid'] = data['pid'].astype('int32')
+    for col in ['click', 'like', 'follow', 'playing_time', 'duration_time']:
+        data[col] = data[col].astype('float16')
+    return data
+
+
 if __name__ == '__main__':
 
     # "================================加入历史pid================================="
@@ -323,10 +328,10 @@ if __name__ == '__main__':
     # train_inter['is_test'] = False
     # test_inter['is_test'] = True
     # inter = pd.concat([train_inter, test_inter])
-    # # # inter = handle_inter(inter, recent_num=30)
+    # # inter = handle_inter(inter, recent_num=30)
     # # inter = parallel_handle_inter(inter, recent_num=30)
     # inter.to_pickle('../data/recent_inter.pkl')
-    #
+
     # train_text = pd.read_pickle('../data/train_text.pkl')
     # test_text = pd.read_pickle('../data/test_text.pkl')
     # text = pd.concat([train_text, test_text])
@@ -355,39 +360,47 @@ if __name__ == '__main__':
     # print(text)
     # text.to_pickle('../data/words_vec_features.pkl')
 
-    # face = pd.read_pickle('../data/face_features.pkl')
-    # text = pd.read_pickle('../data/text_features.pkl')
-    # # text_vec = pd.read_pickle('../data/words_vec_features.pkl')
-    # # text = pd.merge(text, text_vec, on=['pid'])
-    # df = pd.merge(face, text, how='outer', on=['pid'])
-    # # for col in ['face_num', 'face_max_percent', 'face_whole_percent', 'face_male_num', 'face_famale_num',
-    # #             'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']:
-    # #     df[col] = df[col].fillna(0)
-    # empty = np.array([])
-    # df['words'] = df['words'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
-    # empty = np.zeros([31])
-    # empty[28:31] = 8
-    # df['face_cols_01'] = df['face_cols_01'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
-    # empty = np.zeros([31])
-    # empty[28:31] = 28
-    # df['face_cols_num'] = df['face_cols_num'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
-    # # empty = np.zeros([128])
-    # # df['words_vec'] = df['words_vec'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
-    # print(df.sort_values(['pid']))
-    # df.to_pickle('../data/item_features.pkl')
-    #
-    # recent = pd.read_pickle('../data/recent_inter.pkl')
-    # recent.index = range(recent.shape[0])
-    # print(recent.columns)
-    # item = pd.read_pickle('../data/item_features.pkl')
-    # print(item.columns)
-    # inter = pd.merge(recent, item, how='left', on=['pid'])
-    # print(inter)
-    # print(inter.columns)
+    face = pd.read_pickle('../data/face_features.pkl')
+    text = pd.read_pickle('../data/text_features.pkl')
+    # text_vec = pd.read_pickle('../data/words_vec_features.pkl')
+    # text = pd.merge(text, text_vec, on=['pid'])
+    df = pd.merge(face, text, how='outer', on=['pid'])
+    df['pid'] = df['pid'].astype('int32')
+    # for col in ['face_num', 'face_max_percent', 'face_whole_percent', 'face_male_num', 'face_famale_num',
+    #             'face_gender_mix', 'face_ave_age', 'face_max_appear', 'face_min_appear', 'face_ave_appear']:
+    #     df[col] = df[col].fillna(0)
+    empty = np.array([])
+    df['words'] = df['words'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    empty = np.zeros([31], np.int8)
+    empty[28:31] = 8
+    df['face_cols_01'] = df['face_cols_01'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    empty = np.zeros([31], np.float32)
+    empty[28:31] = 28
+    df['face_cols_num'] = df['face_cols_num'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    # empty = np.zeros([128])
+    # df['words_vec'] = df['words_vec'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+    print(df.sort_values(['pid']))
+    df.to_pickle('../data/item_features.pkl')
+
+    train_inter = pd.read_pickle('../data/train_interaction.pkl')
+    train_inter.columns = ['uid', 'pid', 'click', 'like', 'follow', 'time', 'playing_time', 'duration_time']
+    test_inter = pd.read_pickle('../data/test_interaction.pkl')
+    test_inter.columns = ['uid', 'pid', 'time', 'duration_time']
+    train_inter['is_test'] = False
+    test_inter['is_test'] = True
+    recent = pd.concat([train_inter, test_inter], sort=False)
+    recent = cast_inter(recent)
+    recent.index = range(recent.shape[0])
+    print(recent.columns)
+    item = pd.read_pickle('../data/item_features.pkl')
+    print(item.columns)
+    inter = pd.merge(recent, item, how='left', on=['pid'])
+    print(inter)
+    print(inter.columns)
     # inter.to_pickle('../data/interaction_features.pkl')
 
-    df = pd.read_pickle('../data/interaction_features.pkl')
-    # df = inter
+    # df = pd.read_pickle('../data/interaction_features.pkl')
+    df = inter
     df.index = range(df.shape[0])
     print(df)
     val_set = parallel_get_val_set(df[df['is_test'] == False], 0.05)

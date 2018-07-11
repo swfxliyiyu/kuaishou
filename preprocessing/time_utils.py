@@ -269,7 +269,6 @@ def next_time_diff(df_data):
     print(df_data)
     return df_data
 
-
 def pre_time_diff(df_data):
     train_origin = df_data
     train1 = train_origin[['time', 'user_id', 'photo_id']]

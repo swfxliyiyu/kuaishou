@@ -17,11 +17,15 @@ if __name__ == '__main__':
     print(df_ctx)
     ctx_cols = df_ctx[[col for col in df_ctx.columns if col not in ['user_id', 'photo_id', 'instance_id']]]
     ctx_cols_01 = pd.DataFrame()
-    for col in ctx_cols.columns:
-        ctx_cols_01[col] = pd.qcut(ctx_cols[col].rank(method='first'), 10, range(10))
+    for it, col in enumerate(ctx_cols.columns):
+        ctx_cols_01['ctx_01_{}'.format(it)] = pd.cut(ctx_cols[col], 20, labels=range(20))
+        ctx_cols_01['ctx_01_{}'.format(it)] = ctx_cols_01['ctx_01_{}'.format(it)].astype(np.uint8)
+        ctx_cols_01['ctx_{}'.format(it)] = ctx_cols[col].astype(np.float16)
     print(ctx_cols_01)
     df_ctx = df_ctx.drop(columns=[col for col in df_ctx if col not in ['user_id', 'photo_id']])
-    df_ctx['context'] = [np.asarray(arr) for arr in ctx_cols.as_matrix().tolist()]
-    df_ctx['context_01'] = [np.asarray(arr) for arr in ctx_cols_01.as_matrix().tolist()]
+    # df_ctx['context'] = [np.asarray(arr, dtype=np.float16) for arr in ctx_cols.values.tolist()]
+    # df_ctx['context_01'] = [np.asarray(arr, dtype=np.uint8) for arr in ctx_cols_01.values.tolist()]
+    ctx_cols_01.index = df_ctx.index
+    df_ctx = pd.concat([df_ctx, ctx_cols_01], axis=1)
     print(df_ctx)
     df_ctx.to_pickle('../data/context_feature.pkl')

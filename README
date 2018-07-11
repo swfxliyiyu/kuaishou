@@ -15,3 +15,12 @@ IP: 172.20.20.21
 nohup srun --partition=TITANXP --mpi=pmi2 --gres=gpu:1 -n1 --ntasks-per-node=1 --job-name=FACE01 --kill-on-bad-exit=1 python -u network_user_emb.py >face01_log.txt 2>&1 &
 
 embedding 加relu
+
+复赛
+
+交互总数：60315152
+训练：52134536（验证：2604314）
+测试：8180616
+物品量：9204230
+重复词：152092
+用户量：37821
