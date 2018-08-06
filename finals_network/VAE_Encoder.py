@@ -1,3 +1,5 @@
+import random
+
 import tensorflow as tf
 import time
 from tensorflow.examples.tutorials.mnist import input_data
@@ -24,24 +26,26 @@ class VAE(object):
                                dtype=tf.float32, name=name)
         return bias
 
-    def vae_encoder(self, x):
-        W_encoder_input_hidden = self.weight_variable([self.input_dim, self.hidden_encoder_dim], 'hidden_weight')
-        b_encoder_input_hidden = self.bias_variable([self.hidden_encoder_dim], 'hidden_bias')
+    def vae_encoder(self, x, name=None):
+        if name is None:
+            name = 'vae_' + str(random.random())[-5:]
+        W_encoder_input_hidden = self.weight_variable([self.input_dim, self.hidden_encoder_dim], name+'_hidden_weight')
+        b_encoder_input_hidden = self.bias_variable([self.hidden_encoder_dim], name+'_hidden_bias')
         self.l2_loss += tf.nn.l2_loss(W_encoder_input_hidden)
 
         # Hidden layer encoder
         hidden_encoder = tf.nn.relu(tf.matmul(x, W_encoder_input_hidden) + b_encoder_input_hidden)
 
-        W_encoder_hidden_mu = self.weight_variable([self.hidden_encoder_dim, self.latent_dim], 'hidden_mu_weight')
-        b_encoder_hidden_mu = self.bias_variable([self.latent_dim], 'hidden_mu_bias')
+        W_encoder_hidden_mu = self.weight_variable([self.hidden_encoder_dim, self.latent_dim], name+'_hidden_mu_weight')
+        b_encoder_hidden_mu = self.bias_variable([self.latent_dim], name+'_hidden_mu_bias')
         self.l2_loss += tf.nn.l2_loss(W_encoder_hidden_mu)
 
         # Mu encoder
         mu_encoder = tf.matmul(hidden_encoder, W_encoder_hidden_mu) + b_encoder_hidden_mu
 
         W_encoder_hidden_logvar = self.weight_variable([self.hidden_encoder_dim, self.latent_dim],
-                                                       'hidden_logvar_weight')
-        b_encoder_hidden_logvar = self.bias_variable([self.latent_dim], 'hidden_logvar_bias')
+                                                       name+'_hidden_logvar_weight')
+        b_encoder_hidden_logvar = self.bias_variable([self.latent_dim], name+'_hidden_logvar_bias')
         self.l2_loss += tf.nn.l2_loss(W_encoder_hidden_logvar)
 
         # Sigma encoder
@@ -50,7 +54,7 @@ class VAE(object):
 
     def sampler(self, mu_encoder, logvar_encoder):
         # Sample epsilon
-        epsilon = tf.random_normal(tf.shape(logvar_encoder), name='epsilon')
+        epsilon = tf.random_normal(tf.shape(logvar_encoder))
         # Sample latent variable
         std_encoder = tf.exp(0.5 * logvar_encoder)
         z = mu_encoder + tf.multiply(std_encoder, epsilon)

@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -19,6 +16,7 @@ class Model(object):
                  att_reg, lr, prefix,
                  dim_num_feat,
                  user_emb_feat,
+                 ctx_oh_dims,
                  dim_lda,
                  seed=1024,
                  use_deep=True, deep_dims=(256, 128, 64), dim_hidden_out=(64, 32, 16), checkpoint_path=None):
@@ -56,6 +54,7 @@ class Model(object):
         self.deep_dims = deep_dims
         self.dim_hidden_out = dim_hidden_out
         self.user_emb_feat = user_emb_feat
+        self.ctx_oh_dims = ctx_oh_dims
         self.dim_lda = dim_lda
         self.num_faces_cols = 31
         self.dim_usr_cf_emb = 96  # 用户协同过滤embedding维度
@@ -100,6 +99,10 @@ class Model(object):
 
         # embedding的dropout
         self.dropout_emb = tf.placeholder(shape=[], dtype=tf.float32, name='dropout_emb')
+
+        # 上下文context特征
+        self.ctx_oh = tf.placeholder(shape=[None, len(self.ctx_oh_dims)],
+                                     dtype=tf.float32, name='ctx_one_hot')
 
         # deep特征
         if self.use_deep:
@@ -203,6 +206,13 @@ class Model(object):
                                          initializer=tf.glorot_uniform_initializer(),
                                          dtype=tf.float32, name='deep_one_hot_{}'.format(i))
                 self.W_deep_one_hots.append(W_temp)
+
+            self.W_ctx_oh = []
+            for i in range(len(self.ctx_oh_dims)):
+                W_temp = tf.get_variable(shape=[self.ctx_oh_dims[i], self.dim_k],
+                                         initializer=tf.glorot_uniform_initializer(),
+                                         dtype=tf.float32, name='ctx_oh_{}'.format(i))
+                self.W_ctx_oh.append(W_temp)
 
     def _batch_norm_layer(self, x, train_phase, scope_bn):
         with tf.variable_scope(scope_bn):
@@ -333,10 +343,15 @@ class Model(object):
                                                                                            tf.int32))  # [batch_size, dim_k]
                     self.I_one_hot_deep.append(I_Emb_temp_a)
 
+                self.Ctx_oh_emb_deep = []
+                for i in range(len(self.ctx_oh_dims)):
+                    Ctx_emb_temp = tf.nn.embedding_lookup(self.W_ctx_oh[i],
+                                                          tf.cast(self.ctx_oh[:, i], tf.int32))  # [batch_size, dim_k]
+                    self.Ctx_oh_emb_deep.append(Ctx_emb_temp)
                 # self.deep_input = tf.concat([self.num_features, self.Usr_Feat, self.face_num, self.visual_emb_feat],
                 #                             axis=1)  # [batch_size, input_dim]
                 self.deep_input = tf.concat(
-                    [self.num_features, self.visual_emb_feat] + self.I_one_hot_deep, axis=1)
+                    [self.visual_emb_feat] + self.I_one_hot_deep + self.Ctx_oh_emb_deep, axis=1)
                 # 输入加入batch_norm
                 # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
@@ -603,6 +618,7 @@ class Model(object):
         words_lda = input_data['topics'].tolist()
         # num_features = np.asarray(input_data['context'].tolist())
         num_features = input_data[ctx_cols].values
+        ctx_oh = input_data[ctx_oh_cols].values
         face_cols_num = input_data['face_cols_num'].tolist()
         feed_dict_ = {
             self.user_indices: user_ids,
@@ -614,6 +630,7 @@ class Model(object):
             self.one_hots_a: onehots,
             self.batch_size: user_ids.shape[0],
             self.num_features: num_features,
+            self.ctx_oh: ctx_oh,
             self.face_num: face_cols_num,
             self.dropout_deep: self.drop_out_deep_on_train,
             self.dropout_emb: self.drop_out_emb_on_train,
@@ -702,7 +719,7 @@ class Model(object):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.val_datas:
-                labels, item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
+                labels, item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, ctx_oh, face_cols_num = \
                     self.val_datas[it]
             else:
                 user_ids = data['user_indices'].values
@@ -716,6 +733,7 @@ class Model(object):
                 # num_features = data[[col for col in data if '_N' in col]].values
                 # num_features = np.asarray(data['context'].tolist())
                 num_features = data[ctx_cols].values
+                ctx_oh = data[ctx_oh_cols].values
                 face_cols_num = data['face_cols_num'].tolist()
 
             feed_dict_ = {
@@ -727,6 +745,7 @@ class Model(object):
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
+                self.ctx_oh: ctx_oh,
                 self.face_num: face_cols_num,
                 self.dropout_deep: 0,
                 self.dropout_emb: 0,
@@ -736,7 +755,7 @@ class Model(object):
             if cache:
                 self.val_datas[it] = [labels, item_words_indices, item_words_values, user_ids, visual_emb_feat,
                                       words_lda, onehots,
-                                      num_features, face_cols_num]
+                                      num_features, ctx_oh, face_cols_num]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
             labels_lst.extend(labels)
             preds_lst.extend(pred[0])
@@ -750,9 +769,8 @@ class Model(object):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.test_datas:
-                item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
-                    self.test_datas[
-                        it]
+                item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, ctx_oh, face_cols_num = \
+                self.test_datas[it]
             else:
                 user_ids = data['user_indices'].values
                 visual_emb_feat = data['visual'].tolist()
@@ -761,6 +779,7 @@ class Model(object):
                 onehots = np.concatenate([onehots_1, ], axis=1)
                 # num_features = np.asarray(data['context'].tolist())
                 num_features = data[ctx_cols].values
+                ctx_oh = data[ctx_oh_cols].values
                 item_words_indices, item_words_values = self._item_words_indices_and_values(data)
                 face_cols_num = data['face_cols_num'].tolist()
 
@@ -773,6 +792,7 @@ class Model(object):
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
+                self.ctx_oh: ctx_oh,
                 self.face_num: face_cols_num,
                 self.dropout_deep: 0,
                 self.dropout_emb: 0,
@@ -783,6 +803,7 @@ class Model(object):
                                        words_lda,
                                        onehots,
                                        num_features,
+                                       ctx_oh,
                                        face_cols_num]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
             preds_lst.extend(pred[0])
@@ -796,7 +817,7 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'lda_reg002_ctxoh_deep_lr00025.pkl'))
 
 
 if __name__ == '__main__':
@@ -807,7 +828,6 @@ if __name__ == '__main__':
     visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
     visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
     visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
-
 
     # visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
     # visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
@@ -837,12 +857,10 @@ if __name__ == '__main__':
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
 
-    # 删除掉user_like_mean以及ctx_oh
-    for df in [train_data, val_data, test_data]:
-        del df['user_like_mean']
-        df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
-    import gc
-    gc.collect()
+    ctx_oh_cols = [col for col in train_data.columns if
+                   'ctx_01' in col and 'hour' not in col and 'diff_level' not in col]
+    ctx_oh_dims = [20] * dim_num_feat
+    print('ctx_oh_dims:', ctx_oh_dims)
 
     model_params = {
         'num_user': 37821,
@@ -850,19 +868,20 @@ if __name__ == '__main__':
         'num_words': 152092,
         'dim_num_feat': dim_num_feat,
         'one_hots_dims': one_hots_dims,
+        'ctx_oh_dims': ctx_oh_dims,
         'dim_k': 96,
         'att_dim_k': 16,
         'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.00025,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
-        'deep_dims': (1024, 512, 256),
-        'checkpoint_path': '../model/lda.mdl'
+        'deep_dims': (1280, 740, 320),
+        'checkpoint_path': '../model/lda_ctx_oh.mdl'
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')

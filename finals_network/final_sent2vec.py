@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -19,6 +16,7 @@ class Model(object):
                  att_reg, lr, prefix,
                  dim_num_feat,
                  user_emb_feat,
+                 user_like_vae,
                  dim_lda,
                  seed=1024,
                  use_deep=True, deep_dims=(256, 128, 64), dim_hidden_out=(64, 32, 16), checkpoint_path=None):
@@ -56,9 +54,14 @@ class Model(object):
         self.deep_dims = deep_dims
         self.dim_hidden_out = dim_hidden_out
         self.user_emb_feat = user_emb_feat
+        self.user_like_vae = user_like_vae
+
         self.dim_lda = dim_lda
         self.num_faces_cols = 31
         self.dim_usr_cf_emb = 96  # 用户协同过滤embedding维度
+        self.dim_usr_like_vae = 2048
+        self.dim_sentence = 64
+        self.dim_stacking = dim_stacking
 
         self._build_graph()
 
@@ -78,11 +81,8 @@ class Model(object):
 
         self.user_indices = tf.placeholder(shape=[None], dtype=tf.float32, name='user_indices')  # [batch_size]
 
-        self.item_words_indices_a = tf.placeholder(shape=[None, 2], dtype=tf.float32,
-                                                   name='item_words_indices_a')  # [num_indices, dim]
-
-        self.item_words_values_a = tf.placeholder(shape=[None], dtype=tf.float32,
-                                                  name='item_words_values_a')  # [num_indices]
+        self.sentence_emb_feat = tf.placeholder(shape=[None, self.dim_sentence], dtype=tf.float32,
+                                                name='sentence_emb_feat')
 
         self.visual_emb_feat = tf.placeholder(shape=[None, 2048], dtype=tf.float32,
                                               name='visual_features')
@@ -110,6 +110,9 @@ class Model(object):
 
             self.dropout_deep = tf.placeholder(shape=[], dtype=tf.float32, name='dropout_deep')
 
+        self.stacking_feats = tf.placeholder(shape=[None, self.dim_stacking], dtype=tf.float32,
+                                             name='stacking_feats')
+
     def _create_weights(self):
 
         # Embedding
@@ -120,9 +123,17 @@ class Model(object):
                                               initializer=tf.glorot_uniform_initializer(),
                                               dtype=tf.float32, name='user_feat_embedding')
 
+        self.W_usr_like_vae = tf.get_variable(shape=[self.dim_usr_like_vae, self.dim_k],
+                                              initializer=tf.glorot_uniform_initializer(),
+                                              dtype=tf.float32, name='user_like_vae_embedding')
+
         self.Wwords_Emb = tf.get_variable(shape=[self.num_words, self.dim_k],
                                           initializer=tf.glorot_uniform_initializer(),
                                           dtype=tf.float32, name='words_embedding')
+
+        self.W_Sent_Emb = tf.get_variable(shape=[self.dim_sentence, self.dim_k],
+                                          initializer=tf.glorot_uniform_initializer(),
+                                          dtype=tf.float32, name='sentence_embedding')
 
         self.W_LDA_emb = tf.get_variable(shape=[self.dim_lda, self.dim_k],
                                          initializer=tf.glorot_uniform_initializer(),
@@ -158,6 +169,10 @@ class Model(object):
         self.WW_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
                                       initializer=tf.glorot_uniform_initializer(),
                                       dtype=tf.float32, name='words_attention')
+
+        self.WSent_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
+                                         initializer=tf.glorot_uniform_initializer(),
+                                         dtype=tf.float32, name='sentence_attention')
 
         self.W_visual_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
                                             initializer=tf.glorot_uniform_initializer(),
@@ -241,6 +256,9 @@ class Model(object):
             self.Usr_Feat = tf.nn.embedding_lookup(self.user_emb_feat,
                                                    tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_cf_emb]
 
+            self.Usr_Like_VAE = tf.nn.embedding_lookup(self.user_like_vae,
+                                                       tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_cf_emb]
+
             self.bias_usr_feat_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
                                                      dtype=tf.float32,
                                                      name='bias_usr_feat_emb')
@@ -248,10 +266,20 @@ class Model(object):
             self.Usr_Feat_Emb = tf.matmul(self.Usr_Feat,
                                           self.W_usr_feat_emb) + self.bias_usr_feat_emb  # [batch_size, dim_k]
             self.Usr_Feat_Emb = tf.nn.relu(self.Usr_Feat_Emb)
-            # self.Usr_Feat_Emb = tf.layers.dropout(self.Usr_Feat_Emb, self.dropout_emb)
-            # self.Usr_Feat_Emb = self._batch_norm_layer(self.Usr_Feat_Emb, self.train_phase, 'user_emb_bn')
 
-            self.Usr_Expr_a = self.Usr_Emb + self.Usr_Feat_Emb  # [batch_size, dim_k]
+            self.bias_usr_like_vae = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
+                                                     dtype=tf.float32,
+                                                     name='bias_usr_like_vae')
+
+            # self.Usr_Like_VAE_Emb = tf.matmul(self.Usr_Like_VAE,
+            #                                   self.W_usr_like_vae) + self.bias_usr_like_vae  # [batch_size, dim_k]
+            # self.Usr_Like_VAE_Emb = tf.nn.relu(self.Usr_Like_VAE_Emb)
+
+            vae_encoder = VAE(input_dim=self.dim_usr_like_vae, hidden_encoder_dim=1024, latent_dim=self.dim_k,
+                              lam=0.001, kld_loss=0.001)
+            self.Usr_Like_VAE_Emb, self.vae_loss2 = vae_encoder.get_vae_embbeding(self.Usr_Like_VAE)
+            self.Usr_Like_VAE_Emb = self._batch_norm_layer(self.Usr_Like_VAE_Emb, self.train_phase, 'user_likevae_bn')
+            self.Usr_Expr_a = self.Usr_Emb + self.Usr_Feat_Emb + self.Usr_Like_VAE_Emb  # [batch_size, dim_k]
 
         # 环境的向量表示
         with tf.name_scope('context_express'):
@@ -264,23 +292,34 @@ class Model(object):
 
         # 物品的向量表示
         with tf.name_scope('item_express'):
-            self.I_Wds_a = tf.SparseTensor(indices=tf.cast(self.item_words_indices_a, dtype=np.int64),
-                                           values=self.item_words_values_a,
-                                           dense_shape=[tf.cast(self.batch_size, dtype=np.int64), self.num_words])
+            # self.I_Wds_a = tf.SparseTensor(indices=tf.cast(self.item_words_indices_a, dtype=np.int64),
+            #                                values=self.item_words_values_a,
+            #                                dense_shape=[tf.cast(self.batch_size, dtype=np.int64), self.num_words])
+
             self.att_u_a = tf.matmul(self.Usr_Expr_a, self.Wu_oh_Att)  # [batch_size, dim_att]
             self.att_ctx = tf.matmul(self.Ctx_Emb, self.Wctx_Att)
             self.att_oh = []
             self.bias_wds_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
                                                 dtype=tf.float32,
                                                 name='bias_wds_emb')
-            self.I_Wds_Emb_a = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
-                                                             self.Wwords_Emb) + self.bias_wds_emb  # [batch_size, dim_k]
-            self.I_Wds_Emb_a = tf.nn.relu(self.I_Wds_Emb_a)
+            # self.I_Wds_Emb_a = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
+            #                                                  self.Wwords_Emb) + self.bias_wds_emb  # [batch_size, dim_k]
+            # self.I_Wds_Emb_a = tf.nn.relu(self.I_Wds_Emb_a)
+            #
+            # self.att_I_Wds = tf.matmul(self.I_Wds_Emb_a, self.WW_Att)  # 词的attention
+            # self.att_I_Wds = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_Wds + self.b_oh_Att)
+            # self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
+            # self.att_oh.append(self.att_I_Wds)
+            self.bias_sent_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
+                                                 dtype=tf.float32,
+                                                 name='bias_sent_emb')
+            self.I_Sent = tf.matmul(self.sentence_emb_feat, self.W_Sent_Emb) + self.bias_sent_emb
+            self.I_Sent = tf.nn.relu(self.I_Sent)
 
-            self.att_I_Wds = tf.matmul(self.I_Wds_Emb_a, self.WW_Att)  # 词的attention
-            self.att_I_Wds = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_Wds + self.b_oh_Att)
-            self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
-            self.att_oh.append(self.att_I_Wds)
+            self.att_I_Sent = tf.matmul(self.I_Sent, self.WSent_Att)  # 句子的attention
+            self.att_I_Sent = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_Sent + self.b_oh_Att)
+            self.att_I_Sent = tf.matmul(self.att_I_Sent, self.w_oh_Att) + self.c_oh_Att
+            self.att_oh.append(self.att_I_Sent)
 
             vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=self.dim_k, lam=0.001, kld_loss=0.001)
             self.I_visual_Emb, self.vae_loss = vae_encoder.get_vae_embbeding(self.visual_emb_feat)
@@ -314,19 +353,20 @@ class Model(object):
                 self.att_oh.append(att_temp)
                 self.I_One_hot_a.append(I_Emb_temp_a)
             self.att_oh = tf.nn.softmax(tf.concat(self.att_oh, axis=1))  # [batch_size, oh_dim] 第一列是词attention
-            self.I_Wds_Emb_a = self.I_Wds_Emb_a * self.att_oh[:, 0:1]
+            # self.I_Wds_Emb_a = self.I_Wds_Emb_a * self.att_oh[:, 0:1]
+            self.I_Sent = self.I_Sent * self.att_oh[:, 0:1]
             self.I_visual_Emb = self.I_visual_Emb * self.att_oh[:, 1:2]
             self.I_LDA_Emb = self.I_LDA_Emb * self.att_oh[:, 2:3]
             for i in range(3, len(self.one_hots_dims) + 3):
                 self.I_One_hot_a[i - 3] = self.I_One_hot_a[i - 3] * self.att_oh[:, i:i + 1]
-            self.Item_Expr_a = tf.add_n(self.I_One_hot_a + [self.I_visual_Emb, self.I_Wds_Emb_a, self.I_LDA_Emb])
+            self.Item_Expr_a = tf.add_n(self.I_One_hot_a + [self.I_visual_Emb, self.I_Sent, self.I_LDA_Emb])
 
         with tf.name_scope('deep'):
             if self.use_deep:
                 self.Usr_emb_deep = tf.nn.embedding_lookup(self.Wu_deep_emb,
                                                            tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_k]
-                self.I_Wds_emb_deep = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
-                                                                    self.Wwords_deep_emb)  # [batch_size, dim_k]
+                # self.I_Wds_emb_deep = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
+                #                                                     self.Wwords_deep_emb)  # [batch_size, dim_k]
                 self.I_one_hot_deep = []
                 for i in range(len(self.one_hots_dims)):
                     I_Emb_temp_a = tf.nn.embedding_lookup(self.W_deep_one_hots[i], tf.cast(self.one_hots_a[:, i],
@@ -357,15 +397,17 @@ class Model(object):
             # self.ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * self.Usr_Expr_a, rate=self.dropout_emb)
             self.ctx_item_out = tf.layers.dropout(self.Ctx_Emb * self.Item_Expr_a, rate=self.dropout_emb)
             self.cf_outs = []
-            for usr_expr in [self.Usr_Emb, self.Usr_Feat_Emb]:
+            for usr_expr in [self.Usr_Emb, self.Usr_Feat_Emb, self.Usr_Like_VAE_Emb]:
                 cf_out = tf.layers.dropout(self.Item_Expr_a * usr_expr, rate=self.dropout_emb)
                 ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * usr_expr, rate=self.dropout_emb)
                 self.cf_outs.extend([cf_out, ctx_usr_out])
-
             if self.use_deep:
-                self.concated = tf.concat(self.cf_outs + [self.ctx_item_out, self.deep_input], axis=1)
+                self.stacking_feats = tf.layers.dropout(self.stacking_feats, rate=self.dropout_deep)
+
+                self.concated = tf.concat(self.cf_outs + [self.ctx_item_out, self.deep_input, self.stacking_feats],
+                                          axis=1)
             else:
-                self.concated = tf.concat(self.cf_outs + [self.ctx_item_out], axis=1)
+                self.concated = tf.concat(self.cf_outs + [self.ctx_item_out, self.stacking_feats], axis=1)
 
             self.hidden = self.concated
             for i, dim in enumerate(self.dim_hidden_out):
@@ -391,17 +433,19 @@ class Model(object):
     def _create_loss(self):
 
         self.biases = [self.bias, self.bu,
-                       self.c_oh_Att, self.b_oh_Att, self.b_in_prd_att,
+                       self.c_oh_Att, self.b_oh_Att, self.b_in_prd_att, self.bias_usr_like_vae,
                        self.bias_usr_feat_emb, self.bias_ctx_emb, self.bias_wds_emb, self.bias_lda_emb,
+                       self.bias_sent_emb,
                        ]
 
         # self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
         #                self.W_LDA_emb] + self.W_one_hots + self.biases
 
-        self.params = [self.Usr_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
-                       self.W_LDA_emb, ] + self.I_One_hot_a + self.biases
+        self.params = [self.Usr_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb, self.W_usr_like_vae,
+                       self.W_LDA_emb, self.W_Sent_Emb] + self.I_One_hot_a + self.biases
 
         self.att_params = [self.WW_Att, self.W_visual_Att, self.Wu_oh_Att, self.Wctx_Att, self.W_LDA_Att,
+                           self.WSent_Att,
                            self.w_oh_Att,
                            self.w_in_prd_att,
                            self.W_in_prd_att,
@@ -417,6 +461,7 @@ class Model(object):
             self.loss = tf.add(self.loss, self.att_reg * tf.nn.l2_loss(param))
             # self.optimizer = tf.train.AdamOptimizer(0.001).minimize(self.loss)
         self.loss += self.vae_loss
+        self.loss += self.vae_loss2
 
     def _create_metrics(self, metric):
         """
@@ -430,9 +475,9 @@ class Model(object):
         :param optimizer: str of optimizer or predefined optimizer in tensorflow
         :return: optimizer object
         """
-
+        self.learning_rate = tf.train.exponential_decay(self.lr, self.global_step, 300, 0.96, staircase=True)
         optimizer_dict = {'sgd': tf.train.GradientDescentOptimizer(self.lr),
-                          'adam': tf.train.AdamOptimizer(self.lr),
+                          'adam': tf.train.AdamOptimizer(self.learning_rate),
                           'adagrad': tf.train.AdagradOptimizer(self.lr),
                           # 'adagradda':tf.train.AdagradDAOptimizer(),
                           'rmsprop': tf.train.RMSPropOptimizer(self.lr),
@@ -552,11 +597,11 @@ class Model(object):
                     batch_x)
                 # TODO 显示频率
                 if j / iters < .5:
-                    display = int(min_display * 500)
-                elif j / iters < .85:
-                    display = int(min_display * 500)
+                    display = int(min_display * 10)
+                elif j / iters < .92:
+                    display = int(min_display * 10)
                 else:
-                    display = int(min_display / 2)
+                    display = int(min_display * 0.6)
                 if j % display == 0 or j == iters - 1:
                     tr_loss = loss
                     self.tr_loss_list.append(tr_loss)
@@ -571,15 +616,15 @@ class Model(object):
                             "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
                                 i, j, tr_loss, val_loss, total_time))
 
-                        if val_loss < self.best_loss:
+                        if j > 5900 and val_loss < self.best_loss:
                             self.best_loss = val_loss
                             if test_data is not None:
                                 self.preds = self.pred_prob(test_data)
-                            if i > 1:
-                                try:
-                                    self.save_model(self.checkpoint_path + '.best')
-                                except Exception as e:
-                                    print(e)
+                            # if i > 1:
+                            #     try:
+                            #         self.save_model(self.checkpoint_path + '.best')
+                            #     except Exception as e:
+                            #         print(e)
                 # self.save_model(self.checkpoint_path)
                 if (i * iters) + j == max_iter:
                     stop_flag = True
@@ -593,28 +638,28 @@ class Model(object):
 
     def train_on_batch(self, input_data):  # fit a batch
         user_ids = input_data['user_indices'].values
-
+        sent_emb_feat = input_data['text_vec'].tolist()
         labels = input_data['click'].values
         onehots_1 = input_data['face_cols_01'].tolist()
         # onehots_2 = input_data[[col for col in input_data if '_01' in col]].values
         onehots = np.concatenate([onehots_1], axis=1)
-        item_words_indices, item_words_values = self._item_words_indices_and_values(input_data)
         visual_emb_feat = input_data['visual'].tolist()
         words_lda = input_data['topics'].tolist()
         # num_features = np.asarray(input_data['context'].tolist())
         num_features = input_data[ctx_cols].values
+        stacking_feats = input_data[stacking_cols].values
         face_cols_num = input_data['face_cols_num'].tolist()
         feed_dict_ = {
             self.user_indices: user_ids,
+            self.sentence_emb_feat: sent_emb_feat,
             self.visual_emb_feat: visual_emb_feat,
-            self.item_words_indices_a: item_words_indices,
-            self.item_words_values_a: item_words_values,
             self.words_lda: words_lda,
             self.labels: labels,
             self.one_hots_a: onehots,
             self.batch_size: user_ids.shape[0],
             self.num_features: num_features,
             self.face_num: face_cols_num,
+            self.stacking_feats: stacking_feats,
             self.dropout_deep: self.drop_out_deep_on_train,
             self.dropout_emb: self.drop_out_emb_on_train,
             self.train_phase: True,
@@ -627,27 +672,28 @@ class Model(object):
         loss_sum = 0
         for input_data in np.array_split(data, split):
             user_ids = input_data['user_indices'].values
+            sent_emb_feat = input_data['text_vec'].tolist()
 
             labels = input_data['click'].values
             onehots_1 = np.asarray(input_data['face_cols_01'].tolist())
             # onehots_2 = input_data[[col for col in input_data if '_01' in col]].values
             onehots = np.concatenate([onehots_1], axis=1)
-            item_words_indices, item_words_values = self._item_words_indices_and_values(input_data)
             visual_emb_feat = input_data['visual'].tolist()
             words_lda = np.asarray(input_data['topics'].tolist())
             # num_features = input_data[[col for col in input_data if '_N' in col]].values
             num_features = np.asarray(input_data['context'].tolist())
+            stacking_feats = input_data[stacking_cols].values
             face_cols_num = np.asarray(input_data['face_cols_num'].tolist())
             feed_dict_ = {
                 self.user_indices: user_ids,
+                self.sentence_emb_feat: sent_emb_feat,
                 self.visual_emb_feat: visual_emb_feat,
-                self.item_words_indices_a: item_words_indices,
-                self.item_words_values_a: item_words_values,
                 self.words_lda: words_lda,
                 self.labels: labels,
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
+                self.stacking_feats: stacking_feats,
                 self.face_num: face_cols_num,
                 self.dropout_deep: self.drop_out_deep_on_train,
                 self.dropout_emb: self.drop_out_emb_on_train,
@@ -702,31 +748,29 @@ class Model(object):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.val_datas:
-                labels, item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
-                    self.val_datas[it]
+                [labels, user_ids, sent_emb_feat, visual_emb_feat, words_lda, onehots,
+                 num_features, stacking_feats, face_cols_num] = self.val_datas[it]
             else:
                 user_ids = data['user_indices'].values
+                sent_emb_feat = data['text_vec'].tolist()
                 visual_emb_feat = data['visual'].tolist()
                 words_lda = data['topics'].tolist()
                 labels = data['click'].values
                 onehots_1 = data['face_cols_01'].tolist()
-                # onehots_2 = data[[col for col in data if '_01' in col]].values
                 onehots = np.concatenate([onehots_1], axis=1)
-                item_words_indices, item_words_values = self._item_words_indices_and_values(data)
-                # num_features = data[[col for col in data if '_N' in col]].values
-                # num_features = np.asarray(data['context'].tolist())
                 num_features = data[ctx_cols].values
+                stacking_feats = data[stacking_cols].values
                 face_cols_num = data['face_cols_num'].tolist()
 
             feed_dict_ = {
                 self.user_indices: user_ids,
+                self.sentence_emb_feat: sent_emb_feat,
                 self.visual_emb_feat: visual_emb_feat,
                 self.words_lda: words_lda,
-                self.item_words_indices_a: item_words_indices,
-                self.item_words_values_a: item_words_values,
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
+                self.stacking_feats: stacking_feats,
                 self.face_num: face_cols_num,
                 self.dropout_deep: 0,
                 self.dropout_emb: 0,
@@ -734,9 +778,9 @@ class Model(object):
 
             }
             if cache:
-                self.val_datas[it] = [labels, item_words_indices, item_words_values, user_ids, visual_emb_feat,
+                self.val_datas[it] = [labels, user_ids, sent_emb_feat, visual_emb_feat,
                                       words_lda, onehots,
-                                      num_features, face_cols_num]
+                                      num_features, stacking_feats, face_cols_num]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
             labels_lst.extend(labels)
             preds_lst.extend(pred[0])
@@ -750,39 +794,40 @@ class Model(object):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.test_datas:
-                item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
-                    self.test_datas[
-                        it]
+                [user_ids, sent_emb_feat, visual_emb_feat, words_lda, onehots, num_features,
+                 stacking_feats, face_cols_num] = self.test_datas[it]
             else:
                 user_ids = data['user_indices'].values
+                sent_emb_feat = data['text_vec'].tolist()
                 visual_emb_feat = data['visual'].tolist()
                 onehots_1 = data['face_cols_01'].tolist()
                 words_lda = data['topics'].tolist()
                 onehots = np.concatenate([onehots_1, ], axis=1)
                 # num_features = np.asarray(data['context'].tolist())
                 num_features = data[ctx_cols].values
-                item_words_indices, item_words_values = self._item_words_indices_and_values(data)
+                stacking_feats = data[stacking_cols].values
                 face_cols_num = data['face_cols_num'].tolist()
 
             feed_dict_ = {
                 self.user_indices: user_ids,
+                self.sentence_emb_feat: sent_emb_feat,
                 self.visual_emb_feat: visual_emb_feat,
-                self.item_words_indices_a: item_words_indices,
-                self.item_words_values_a: item_words_values,
                 self.words_lda: words_lda,
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
+                self.stacking_feats: stacking_feats,
                 self.face_num: face_cols_num,
                 self.dropout_deep: 0,
                 self.dropout_emb: 0,
                 self.train_phase: False,
             }
             if cache:
-                self.test_datas[it] = [item_words_indices, item_words_values, user_ids, visual_emb_feat,
+                self.test_datas[it] = [user_ids, sent_emb_feat, visual_emb_feat,
                                        words_lda,
                                        onehots,
                                        num_features,
+                                       stacking_feats,
                                        face_cols_num]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
             preds_lst.extend(pred[0])
@@ -796,18 +841,28 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'likevisual2048_stkfeatsdropout_text2vec_reg002_visual_lr0012.pkl'))
 
 
 if __name__ == '__main__':
     user_embs = pd.read_pickle('../model/user_emb.pkl')
     user_embs = user_embs.sort_values(['user_indices'])
     user_embs = np.array(user_embs['user_emb'].tolist(), np.float32)
+
+    # user_like = pd.read_pickle('../model/user_like_vae.pkl')
+    # user_like = user_like.sort_values(['user_indices'])
+    # user_like = np.array(user_like['user_like_vae'].tolist(), np.float32)
+
+    user_like = pd.read_pickle('../model/user_like_visual_lda_face.pkl')
+    user_like = user_like.sort_values(['user_indices'])
+    user_like = np.array(user_like['user_like_visual'].tolist(), np.float32)
+    # user_like = np.concatenate([user_like['user_like_visual'].tolist(), user_like['user_like_lda'].tolist(),
+    #                             user_like['user_like_face'].tolist()], axis=1).astype(np.float32)
+
     visual_train1 = pd.read_pickle('../data/visual/visual_feature_train_1.pkl')
     visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
     visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
     visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
-
 
     # visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
     # visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
@@ -816,6 +871,8 @@ if __name__ == '__main__':
     # print(visual_embs.shape[0], 'photos...')
     # print(visual_embs['pid'].nunique(), 'unique photos...')
 
+    text_vec = pd.read_pickle('../data/text2vec.pkl')
+
     val_data = pd.read_pickle('../data/val_data.pkl')
     train_data = pd.read_pickle('../data/train_data.pkl')
     test_data = pd.read_pickle('../data/test_data.pkl')
@@ -823,9 +880,21 @@ if __name__ == '__main__':
     # for df in [train_data, test_data, val_data]:
     #     df['topics'] = df['topics'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
 
+    train_data, val_data, test_data = [pd.merge(df, text_vec, 'left', 'pid') for df in
+                                       [train_data, val_data, test_data]]
+    empty = np.zeros(shape=[64])
+    for df in [train_data, test_data, val_data]:
+        df['text_vec'] = df['text_vec'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
+
+    print('merged text2vec...')
+
     train_data, val_data = [pd.merge(df, visual_train, 'left', 'pid') for df in
                             [train_data, val_data]]
     test_data = pd.merge(test_data, visual_test, 'left', 'pid')
+
+    print('merged visual...')
+
+
 
     one_hots_dims = []
     face_cols = np.array(train_data['face_cols_01'].tolist(), np.uint16)
@@ -833,15 +902,20 @@ if __name__ == '__main__':
     print('one_hot_dims:', one_hots_dims)
 
     # dim_num_feat = val_data.ix[0, 'context'].shape[0]
-    ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col]
+    ctx_cols = [col for col in train_data.columns if
+                'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col and 'stacking' not in col]
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
 
+    stacking_cols = [col for col in train_data.columns if 'stacking' in col and 'cross' not in col]
+    dim_stacking = len(stacking_cols)
+    print('stacking_cols:', stacking_cols)
     # 删除掉user_like_mean以及ctx_oh
     for df in [train_data, val_data, test_data]:
         del df['user_like_mean']
         df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
     import gc
+
     gc.collect()
 
     model_params = {
@@ -853,16 +927,17 @@ if __name__ == '__main__':
         'dim_k': 96,
         'att_dim_k': 16,
         'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
+        'user_like_vae': user_like,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.0012,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
         'deep_dims': (1024, 512, 256),
-        'checkpoint_path': '../model/lda.mdl'
+        'checkpoint_path': '../model/like.mdl'
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')

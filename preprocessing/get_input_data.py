@@ -7,8 +7,6 @@ from itertools import chain
 from collections import defaultdict
 
 cnt = 0
-
-
 def handle_text(text):
     dic = {}
     dic_count = defaultdict(lambda: 0)
@@ -70,7 +68,6 @@ def words_to_vec(text):
 
     text['words_vec'] = text['text'].apply(sentence2vec)
     return text
-
 
 count = 0
 

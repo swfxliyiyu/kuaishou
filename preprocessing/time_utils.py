@@ -266,6 +266,7 @@ def next_time_diff(df_data):
     train2 = train2.rename(columns={'time_x': 'time'})
     df_data = pd.merge(train_origin, train2, on=['user_id', 'time'], how='left')
     # df_data = df_data.rename(columns={ 'photo_id': 'photo_id', 'time_x': 'time'})
+    df_data['next_time_diff'] = df_data['next_time_diff'].astype('float32')
     print(df_data)
     return df_data
 
@@ -332,30 +333,30 @@ if __name__ == '__main__':
     test_inter = pd.read_pickle('../data/test_interaction.pkl')
     test_inter.columns = ['user_id', 'photo_id', 'time', 'duration_time']
     inter = pd.concat([train_inter, test_inter], ignore_index=True, sort=False)
-    inter = inter.drop(columns=['like', 'follow', 'playing_time', 'duration_time'])
+    # inter = inter.drop(columns=['like', 'follow', 'playing_time', 'duration_time'])
     inter = trans_time(inter)
 
-    inter = parallel_user_cnt_pre8min(inter)
-    inter[['user_id','photo_id','user_pre8min_cnt','user_aft8min_cnt']].to_pickle('../data/context_feature/user_cnt_pre8min.pkl')
-
-    inter = user_batch_cnt_pre8min(inter)
-    inter[['user_id','photo_id','user_batch_cnt_pre8min','user_batch_cnt_aft8min']].to_pickle('../data/context_feature/user_batch_cnt_pre8min.pkl')
-
-    inter = parallel_photo_batch_cnt_pre1day(inter)
-    inter[['user_id','photo_id','photo_batch_cnt_pre1day','photo_batch_cnt_aft1day']].to_pickle('../data/context_feature/photo_batch_cnt_pre1day.pkl')
-
+    # inter = parallel_user_cnt_pre8min(inter)
+    # inter[['user_id','photo_id','user_pre8min_cnt','user_aft8min_cnt']].to_pickle('../data/context_feature/user_cnt_pre8min.pkl')
+    #
+    # inter = user_batch_cnt_pre8min(inter)
+    # inter[['user_id','photo_id','user_batch_cnt_pre8min','user_batch_cnt_aft8min']].to_pickle('../data/context_feature/user_batch_cnt_pre8min.pkl')
+    #
+    # inter = parallel_photo_batch_cnt_pre1day(inter)
+    # inter[['user_id','photo_id','photo_batch_cnt_pre1day','photo_batch_cnt_aft1day']].to_pickle('../data/context_feature/photo_batch_cnt_pre1day.pkl')
+    #
     inter = next_time_diff(inter)
-    inter[['user_id', 'photo_id', 'next_time_diff']].to_pickle(
+    inter[['user_id', 'photo_id', 'next_time_diff', 'duration_time']].to_pickle(
         '../data/context_feature/next_time_diff.pkl')
 
-    inter = pre_time_diff(inter)
-    inter[['user_id', 'photo_id', 'pre_time_diff']].to_pickle(
-        '../data/context_feature/pre_time_diff.pkl')
-
-    inter = user_photo_total_cnt(inter)
-    inter[['user_id', 'photo_id', 'photo_total_cnt', 'user_total_cnt', 'user_total_batch_cnt']].to_pickle(
-        '../data/context_feature/user_photo_total_cnt.pkl')
-
-    inter = cal_batch_photo_cnt(inter)
-    inter[['user_id', 'photo_id', 'batch_photo_cnt']].to_pickle('../data/context_feature/batch_photo_cnt.pkl')
+    # inter = pre_time_diff(inter)
+    # inter[['user_id', 'photo_id', 'pre_time_diff']].to_pickle(
+    #     '../data/context_feature/pre_time_diff.pkl')
+    #
+    # inter = user_photo_total_cnt(inter)
+    # inter[['user_id', 'photo_id', 'photo_total_cnt', 'user_total_cnt', 'user_total_batch_cnt']].to_pickle(
+    #     '../data/context_feature/user_photo_total_cnt.pkl')
+    #
+    # inter = cal_batch_photo_cnt(inter)
+    # inter[['user_id', 'photo_id', 'batch_photo_cnt']].to_pickle('../data/context_feature/batch_photo_cnt.pkl')
 

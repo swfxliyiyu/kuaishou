@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -19,6 +16,7 @@ class Model(object):
                  att_reg, lr, prefix,
                  dim_num_feat,
                  user_emb_feat,
+                 user_like_vae,
                  dim_lda,
                  seed=1024,
                  use_deep=True, deep_dims=(256, 128, 64), dim_hidden_out=(64, 32, 16), checkpoint_path=None):
@@ -56,9 +54,12 @@ class Model(object):
         self.deep_dims = deep_dims
         self.dim_hidden_out = dim_hidden_out
         self.user_emb_feat = user_emb_feat
+        self.user_like_vae = user_like_vae
+
         self.dim_lda = dim_lda
         self.num_faces_cols = 31
         self.dim_usr_cf_emb = 96  # 用户协同过滤embedding维度
+        self.dim_usr_like_vae = 2048
 
         self._build_graph()
 
@@ -119,6 +120,10 @@ class Model(object):
         self.W_usr_feat_emb = tf.get_variable(shape=[self.dim_usr_cf_emb, self.dim_k],
                                               initializer=tf.glorot_uniform_initializer(),
                                               dtype=tf.float32, name='user_feat_embedding')
+
+        self.W_usr_like_vae = tf.get_variable(shape=[self.dim_usr_like_vae, self.dim_k],
+                                              initializer=tf.glorot_uniform_initializer(),
+                                              dtype=tf.float32, name='user_like_vae_embedding')
 
         self.Wwords_Emb = tf.get_variable(shape=[self.num_words, self.dim_k],
                                           initializer=tf.glorot_uniform_initializer(),
@@ -232,6 +237,20 @@ class Model(object):
             vectors[i] = vector * atts[:, i:i + 1]
         return vectors
 
+    def _hightway_layer(self, x, dim, name):
+        W_t = tf.get_variable(shape=[dim, dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                              name=name + '_W_t')
+        b_t = tf.get_variable(shape=[dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                              name=name + '_b_t')
+        t = tf.nn.sigmoid(tf.matmul(x, W_t) + b_t)
+        W = tf.get_variable(shape=[dim, dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_W')
+        b = tf.get_variable(shape=[dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_b')
+        h_x = tf.nn.relu(tf.matmul(x, W) + b)
+        z = t * h_x + (1 - t) * x
+        return z
+
     def _forward_pass(self, ):
         # 用户的向量表示
         with tf.name_scope('user_express'):
@@ -241,6 +260,9 @@ class Model(object):
             self.Usr_Feat = tf.nn.embedding_lookup(self.user_emb_feat,
                                                    tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_cf_emb]
 
+            self.Usr_Like_VAE = tf.nn.embedding_lookup(self.user_like_vae,
+                                                       tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_cf_emb]
+
             self.bias_usr_feat_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
                                                      dtype=tf.float32,
                                                      name='bias_usr_feat_emb')
@@ -248,10 +270,19 @@ class Model(object):
             self.Usr_Feat_Emb = tf.matmul(self.Usr_Feat,
                                           self.W_usr_feat_emb) + self.bias_usr_feat_emb  # [batch_size, dim_k]
             self.Usr_Feat_Emb = tf.nn.relu(self.Usr_Feat_Emb)
-            # self.Usr_Feat_Emb = tf.layers.dropout(self.Usr_Feat_Emb, self.dropout_emb)
-            # self.Usr_Feat_Emb = self._batch_norm_layer(self.Usr_Feat_Emb, self.train_phase, 'user_emb_bn')
 
-            self.Usr_Expr_a = self.Usr_Emb + self.Usr_Feat_Emb  # [batch_size, dim_k]
+            self.bias_usr_like_vae = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
+                                                     dtype=tf.float32,
+                                                     name='bias_usr_like_vae')
+
+            # self.Usr_Like_VAE_Emb = tf.matmul(self.Usr_Like_VAE,
+            #                                   self.W_usr_like_vae) + self.bias_usr_like_vae  # [batch_size, dim_k]
+            # self.Usr_Like_VAE_Emb = tf.nn.relu(self.Usr_Like_VAE_Emb)
+
+            vae_encoder = VAE(input_dim=self.dim_usr_like_vae, hidden_encoder_dim=1024, latent_dim=self.dim_k, lam=0.001, kld_loss=0.001)
+            self.Usr_Like_VAE_Emb, self.vae_loss2 = vae_encoder.get_vae_embbeding(self.Usr_Like_VAE)
+            self.Usr_Like_VAE_Emb = self._batch_norm_layer(self.Usr_Like_VAE_Emb, self.train_phase, 'user_likevae_bn')
+            self.Usr_Expr_a = self.Usr_Emb + self.Usr_Feat_Emb + self.Usr_Like_VAE_Emb  # [batch_size, dim_k]
 
         # 环境的向量表示
         with tf.name_scope('context_express'):
@@ -278,7 +309,7 @@ class Model(object):
             self.I_Wds_Emb_a = tf.nn.relu(self.I_Wds_Emb_a)
 
             self.att_I_Wds = tf.matmul(self.I_Wds_Emb_a, self.WW_Att)  # 词的attention
-            self.att_I_Wds = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_Wds + self.b_oh_Att)
+            self.att_I_Wds = tf.nn.tanh(self.att_u_a + self.att_ctx + self.att_I_Wds + self.b_oh_Att)
             self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_Wds)
 
@@ -288,7 +319,7 @@ class Model(object):
             self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase, 'vis_bn')
             # self.I_visual_Emb = tf.layers.dropout(self.I_visual_Emb, self.dropout_emb)
             self.att_I_visual = tf.matmul(self.I_visual_Emb, self.W_visual_Att)  # 图像的attention
-            self.att_I_visual = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_visual + self.b_oh_Att)
+            self.att_I_visual = tf.nn.tanh(self.att_u_a + self.att_ctx + self.att_I_visual + self.b_oh_Att)
             self.att_I_visual = tf.matmul(self.att_I_visual, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_visual)
 
@@ -298,7 +329,7 @@ class Model(object):
             self.I_LDA_Emb = tf.matmul(self.words_lda, self.W_LDA_emb) + self.bias_lda_emb  # [batch_size, dim_k]
             self.I_LDA_Emb = tf.nn.relu(self.I_LDA_Emb)
             self.att_I_LDA = tf.matmul(self.I_LDA_Emb, self.W_LDA_Att)  # LDA的attention
-            self.att_I_LDA = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_LDA + self.b_oh_Att)
+            self.att_I_LDA = tf.nn.tanh(self.att_u_a + self.att_ctx + self.att_I_LDA + self.b_oh_Att)
             self.att_I_LDA = tf.matmul(self.att_I_LDA, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_LDA)
 
@@ -308,7 +339,7 @@ class Model(object):
                                                       tf.cast(self.one_hots_a[:, i],
                                                               tf.int32))  # [batch_size, dim_k]
                 att_oh_temp = tf.matmul(I_Emb_temp_a, self.Woh_Att[i])  # [batch_size, att_dim_k]
-                att_temp = tf.nn.relu(
+                att_temp = tf.nn.tanh(
                     self.att_u_a + self.att_ctx + att_oh_temp + self.b_oh_Att)  # [batch_size, att_dim_k]
                 att_temp = tf.matmul(att_temp, self.w_oh_Att) + self.c_oh_Att  # [batch_size, 1]
                 self.att_oh.append(att_temp)
@@ -340,13 +371,15 @@ class Model(object):
                 # 输入加入batch_norm
                 # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
-                    self.deep_input = tf.layers.dense(inputs=self.deep_input,
-                                                      kernel_initializer=tf.glorot_uniform_initializer(),
-                                                      units=deep_dim, activation=tf.nn.relu, )
 
                     if i == 0:
+                        self.deep_input = tf.layers.dense(inputs=self.deep_input,
+                                                          kernel_initializer=tf.glorot_uniform_initializer(),
+                                                          units=deep_dim, activation=tf.nn.relu, )
                         self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase,
                                                                  'deep_bn_{}'.format(i))
+                    else:
+                        self.deep_input = self._hightway_layer(self.deep_input, deep_dim, 'deep_highway_{}'.format(i))
                     # 加入dropout
                     self.deep_input = tf.layers.dropout(inputs=self.deep_input, rate=self.dropout_deep)
                 self.deep_output = tf.layers.dense(self.deep_input, 1, activation=None)
@@ -357,11 +390,10 @@ class Model(object):
             # self.ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * self.Usr_Expr_a, rate=self.dropout_emb)
             self.ctx_item_out = tf.layers.dropout(self.Ctx_Emb * self.Item_Expr_a, rate=self.dropout_emb)
             self.cf_outs = []
-            for usr_expr in [self.Usr_Emb, self.Usr_Feat_Emb]:
+            for usr_expr in [self.Usr_Emb, self.Usr_Feat_Emb, self.Usr_Like_VAE_Emb]:
                 cf_out = tf.layers.dropout(self.Item_Expr_a * usr_expr, rate=self.dropout_emb)
                 ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * usr_expr, rate=self.dropout_emb)
                 self.cf_outs.extend([cf_out, ctx_usr_out])
-
             if self.use_deep:
                 self.concated = tf.concat(self.cf_outs + [self.ctx_item_out, self.deep_input], axis=1)
             else:
@@ -391,14 +423,14 @@ class Model(object):
     def _create_loss(self):
 
         self.biases = [self.bias, self.bu,
-                       self.c_oh_Att, self.b_oh_Att, self.b_in_prd_att,
+                       self.c_oh_Att, self.b_oh_Att, self.b_in_prd_att, self.bias_usr_like_vae,
                        self.bias_usr_feat_emb, self.bias_ctx_emb, self.bias_wds_emb, self.bias_lda_emb,
                        ]
 
         # self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
         #                self.W_LDA_emb] + self.W_one_hots + self.biases
 
-        self.params = [self.Usr_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
+        self.params = [self.Usr_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb, self.W_usr_like_vae,
                        self.W_LDA_emb, ] + self.I_One_hot_a + self.biases
 
         self.att_params = [self.WW_Att, self.W_visual_Att, self.Wu_oh_Att, self.Wctx_Att, self.W_LDA_Att,
@@ -417,6 +449,7 @@ class Model(object):
             self.loss = tf.add(self.loss, self.att_reg * tf.nn.l2_loss(param))
             # self.optimizer = tf.train.AdamOptimizer(0.001).minimize(self.loss)
         self.loss += self.vae_loss
+        self.loss += self.vae_loss2
 
     def _create_metrics(self, metric):
         """
@@ -430,9 +463,9 @@ class Model(object):
         :param optimizer: str of optimizer or predefined optimizer in tensorflow
         :return: optimizer object
         """
-
+        self.learning_rate = tf.train.exponential_decay(self.lr, self.global_step, 300, 0.96, staircase=True)
         optimizer_dict = {'sgd': tf.train.GradientDescentOptimizer(self.lr),
-                          'adam': tf.train.AdamOptimizer(self.lr),
+                          'adam': tf.train.AdamOptimizer(self.learning_rate),
                           'adagrad': tf.train.AdagradOptimizer(self.lr),
                           # 'adagradda':tf.train.AdagradDAOptimizer(),
                           'rmsprop': tf.train.RMSPropOptimizer(self.lr),
@@ -552,11 +585,11 @@ class Model(object):
                     batch_x)
                 # TODO 显示频率
                 if j / iters < .5:
-                    display = int(min_display * 500)
-                elif j / iters < .85:
-                    display = int(min_display * 500)
+                    display = int(min_display * 10)
+                elif j / iters < .8:
+                    display = int(min_display * 10)
                 else:
-                    display = int(min_display / 2)
+                    display = int(min_display * 0.6)
                 if j % display == 0 or j == iters - 1:
                     tr_loss = loss
                     self.tr_loss_list.append(tr_loss)
@@ -571,7 +604,7 @@ class Model(object):
                             "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
                                 i, j, tr_loss, val_loss, total_time))
 
-                        if val_loss < self.best_loss:
+                        if j > 5900 and val_loss < self.best_loss:
                             self.best_loss = val_loss
                             if test_data is not None:
                                 self.preds = self.pred_prob(test_data)
@@ -796,18 +829,28 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'likevisual2048_tanhatt_highway_decay_reg002_visual_lr0012.pkl'))
 
 
 if __name__ == '__main__':
     user_embs = pd.read_pickle('../model/user_emb.pkl')
     user_embs = user_embs.sort_values(['user_indices'])
     user_embs = np.array(user_embs['user_emb'].tolist(), np.float32)
+
+    # user_like = pd.read_pickle('../model/user_like_vae.pkl')
+    # user_like = user_like.sort_values(['user_indices'])
+    # user_like = np.array(user_like['user_like_vae'].tolist(), np.float32)
+
+    user_like = pd.read_pickle('../model/user_like_visual_lda_face2.pkl')
+    user_like = user_like.sort_values(['user_indices'])
+    user_like = np.array(user_like['user_like_visual'].tolist(), np.float32)
+    # user_like = np.concatenate([user_like['user_like_visual'].tolist(), user_like['user_like_lda'].tolist(),
+    #                             user_like['user_like_face'].tolist()], axis=1).astype(np.float32)
+
     visual_train1 = pd.read_pickle('../data/visual/visual_feature_train_1.pkl')
     visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
     visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
     visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
-
 
     # visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
     # visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
@@ -833,7 +876,8 @@ if __name__ == '__main__':
     print('one_hot_dims:', one_hots_dims)
 
     # dim_num_feat = val_data.ix[0, 'context'].shape[0]
-    ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col]
+    ctx_cols = [col for col in train_data.columns if
+                'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col and 'stacking_cross' not in col]
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
 
@@ -842,6 +886,7 @@ if __name__ == '__main__':
         del df['user_like_mean']
         df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
     import gc
+
     gc.collect()
 
     model_params = {
@@ -852,17 +897,18 @@ if __name__ == '__main__':
         'one_hots_dims': one_hots_dims,
         'dim_k': 96,
         'att_dim_k': 16,
-        'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'dim_hidden_out': (512, 256, 128),
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
+        'user_like_vae': user_like,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.0012,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
-        'deep_dims': (1024, 512, 256),
-        'checkpoint_path': '../model/lda.mdl'
+        'deep_dims': (512, 512, 512, 512),
+        'checkpoint_path': '../model/like.mdl'
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')

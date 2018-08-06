@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -78,12 +75,6 @@ class Model(object):
 
         self.user_indices = tf.placeholder(shape=[None], dtype=tf.float32, name='user_indices')  # [batch_size]
 
-        self.item_words_indices_a = tf.placeholder(shape=[None, 2], dtype=tf.float32,
-                                                   name='item_words_indices_a')  # [num_indices, dim]
-
-        self.item_words_values_a = tf.placeholder(shape=[None], dtype=tf.float32,
-                                                  name='item_words_values_a')  # [num_indices]
-
         self.visual_emb_feat = tf.placeholder(shape=[None, 2048], dtype=tf.float32,
                                               name='visual_features')
 
@@ -120,10 +111,6 @@ class Model(object):
                                               initializer=tf.glorot_uniform_initializer(),
                                               dtype=tf.float32, name='user_feat_embedding')
 
-        self.Wwords_Emb = tf.get_variable(shape=[self.num_words, self.dim_k],
-                                          initializer=tf.glorot_uniform_initializer(),
-                                          dtype=tf.float32, name='words_embedding')
-
         self.W_LDA_emb = tf.get_variable(shape=[self.dim_lda, self.dim_k],
                                          initializer=tf.glorot_uniform_initializer(),
                                          dtype=tf.float32, name='LDA_embedding')
@@ -154,10 +141,6 @@ class Model(object):
                                      initializer=tf.glorot_uniform_initializer(),
                                      dtype=tf.float32, name='oh_attention_{}'.format(i))
             self.Woh_Att.append(W_temp)
-
-        self.WW_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
-                                      initializer=tf.glorot_uniform_initializer(),
-                                      dtype=tf.float32, name='words_attention')
 
         self.W_visual_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
                                             initializer=tf.glorot_uniform_initializer(),
@@ -194,9 +177,6 @@ class Model(object):
             self.Wu_deep_emb = tf.get_variable(shape=[self.num_user, self.dim_k],
                                                initializer=tf.glorot_uniform_initializer(),
                                                dtype=tf.float32, name='user_deep_emb')
-            self.Wwords_deep_emb = tf.get_variable(shape=[self.num_words, self.dim_k],
-                                                   initializer=tf.glorot_uniform_initializer(),
-                                                   dtype=tf.float32, name='words_deep_emb')
             self.W_deep_one_hots = []
             for i in range(len(self.one_hots_dims)):
                 W_temp = tf.get_variable(shape=[self.one_hots_dims[i], self.dim_k],
@@ -264,23 +244,10 @@ class Model(object):
 
         # 物品的向量表示
         with tf.name_scope('item_express'):
-            self.I_Wds_a = tf.SparseTensor(indices=tf.cast(self.item_words_indices_a, dtype=np.int64),
-                                           values=self.item_words_values_a,
-                                           dense_shape=[tf.cast(self.batch_size, dtype=np.int64), self.num_words])
+
             self.att_u_a = tf.matmul(self.Usr_Expr_a, self.Wu_oh_Att)  # [batch_size, dim_att]
             self.att_ctx = tf.matmul(self.Ctx_Emb, self.Wctx_Att)
             self.att_oh = []
-            self.bias_wds_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
-                                                dtype=tf.float32,
-                                                name='bias_wds_emb')
-            self.I_Wds_Emb_a = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
-                                                             self.Wwords_Emb) + self.bias_wds_emb  # [batch_size, dim_k]
-            self.I_Wds_Emb_a = tf.nn.relu(self.I_Wds_Emb_a)
-
-            self.att_I_Wds = tf.matmul(self.I_Wds_Emb_a, self.WW_Att)  # 词的attention
-            self.att_I_Wds = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_Wds + self.b_oh_Att)
-            self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
-            self.att_oh.append(self.att_I_Wds)
 
             vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=self.dim_k, lam=0.001, kld_loss=0.001)
             self.I_visual_Emb, self.vae_loss = vae_encoder.get_vae_embbeding(self.visual_emb_feat)
@@ -314,19 +281,16 @@ class Model(object):
                 self.att_oh.append(att_temp)
                 self.I_One_hot_a.append(I_Emb_temp_a)
             self.att_oh = tf.nn.softmax(tf.concat(self.att_oh, axis=1))  # [batch_size, oh_dim] 第一列是词attention
-            self.I_Wds_Emb_a = self.I_Wds_Emb_a * self.att_oh[:, 0:1]
-            self.I_visual_Emb = self.I_visual_Emb * self.att_oh[:, 1:2]
-            self.I_LDA_Emb = self.I_LDA_Emb * self.att_oh[:, 2:3]
-            for i in range(3, len(self.one_hots_dims) + 3):
-                self.I_One_hot_a[i - 3] = self.I_One_hot_a[i - 3] * self.att_oh[:, i:i + 1]
-            self.Item_Expr_a = tf.add_n(self.I_One_hot_a + [self.I_visual_Emb, self.I_Wds_Emb_a, self.I_LDA_Emb])
+            self.I_visual_Emb = self.I_visual_Emb * self.att_oh[:, 0:1]
+            self.I_LDA_Emb = self.I_LDA_Emb * self.att_oh[:, 1:2]
+            for i in range(2, len(self.one_hots_dims) + 2):
+                self.I_One_hot_a[i - 2] = self.I_One_hot_a[i - 2] * self.att_oh[:, i:i + 1]
+            self.Item_Expr_a = tf.add_n(self.I_One_hot_a + [self.I_visual_Emb, self.I_LDA_Emb])
 
         with tf.name_scope('deep'):
             if self.use_deep:
                 self.Usr_emb_deep = tf.nn.embedding_lookup(self.Wu_deep_emb,
                                                            tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_k]
-                self.I_Wds_emb_deep = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
-                                                                    self.Wwords_deep_emb)  # [batch_size, dim_k]
                 self.I_one_hot_deep = []
                 for i in range(len(self.one_hots_dims)):
                     I_Emb_temp_a = tf.nn.embedding_lookup(self.W_deep_one_hots[i], tf.cast(self.one_hots_a[:, i],
@@ -353,8 +317,6 @@ class Model(object):
                 self.deep_output = tf.reshape(self.deep_output, [-1])  # [batch_size]
 
         with tf.name_scope('output'):
-            # self.cf_out = tf.layers.dropout(self.Item_Expr_a * self.Usr_Expr_a, rate=self.dropout_emb)
-            # self.ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * self.Usr_Expr_a, rate=self.dropout_emb)
             self.ctx_item_out = tf.layers.dropout(self.Ctx_Emb * self.Item_Expr_a, rate=self.dropout_emb)
             self.cf_outs = []
             for usr_expr in [self.Usr_Emb, self.Usr_Feat_Emb]:
@@ -376,32 +338,21 @@ class Model(object):
             self.y_ui_a = tf.layers.dense(self.hidden, 1, activation=None) + self.bu
             self.y_ui_a = tf.reshape(tf.nn.sigmoid(self.y_ui_a), [-1])
 
-            # with tf.name_scope('output'):
-            #     # 输出结果
-            #     self.y_ui_a = tf.reduce_sum(self.Item_Expr_a * self.Usr_Expr_a, axis=1)
-            #     # 用户偏置
-            #     self.y_ui_a = self.y_ui_a + tf.reshape(
-            #         tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32)), [-1])
-            #     # 整体偏置
-            #     self.y_ui_a = self.y_ui_a + self.bias
-            #     if self.use_deep:
-            #         self.y_ui_a += self.deep_output
-            #     self.y_ui_a = tf.nn.sigmoid(self.y_ui_a)
 
     def _create_loss(self):
 
         self.biases = [self.bias, self.bu,
                        self.c_oh_Att, self.b_oh_Att, self.b_in_prd_att,
-                       self.bias_usr_feat_emb, self.bias_ctx_emb, self.bias_wds_emb, self.bias_lda_emb,
+                       self.bias_usr_feat_emb, self.bias_ctx_emb, self.bias_lda_emb,
                        ]
 
         # self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
         #                self.W_LDA_emb] + self.W_one_hots + self.biases
 
-        self.params = [self.Usr_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
+        self.params = [self.Usr_Emb, self.W_Ctx, self.W_usr_feat_emb,
                        self.W_LDA_emb, ] + self.I_One_hot_a + self.biases
 
-        self.att_params = [self.WW_Att, self.W_visual_Att, self.Wu_oh_Att, self.Wctx_Att, self.W_LDA_Att,
+        self.att_params = [self.W_visual_Att, self.Wu_oh_Att, self.Wctx_Att, self.W_LDA_Att,
                            self.w_oh_Att,
                            self.w_in_prd_att,
                            self.W_in_prd_att,
@@ -598,7 +549,7 @@ class Model(object):
         onehots_1 = input_data['face_cols_01'].tolist()
         # onehots_2 = input_data[[col for col in input_data if '_01' in col]].values
         onehots = np.concatenate([onehots_1], axis=1)
-        item_words_indices, item_words_values = self._item_words_indices_and_values(input_data)
+
         visual_emb_feat = input_data['visual'].tolist()
         words_lda = input_data['topics'].tolist()
         # num_features = np.asarray(input_data['context'].tolist())
@@ -607,8 +558,7 @@ class Model(object):
         feed_dict_ = {
             self.user_indices: user_ids,
             self.visual_emb_feat: visual_emb_feat,
-            self.item_words_indices_a: item_words_indices,
-            self.item_words_values_a: item_words_values,
+
             self.words_lda: words_lda,
             self.labels: labels,
             self.one_hots_a: onehots,
@@ -632,7 +582,6 @@ class Model(object):
             onehots_1 = np.asarray(input_data['face_cols_01'].tolist())
             # onehots_2 = input_data[[col for col in input_data if '_01' in col]].values
             onehots = np.concatenate([onehots_1], axis=1)
-            item_words_indices, item_words_values = self._item_words_indices_and_values(input_data)
             visual_emb_feat = input_data['visual'].tolist()
             words_lda = np.asarray(input_data['topics'].tolist())
             # num_features = input_data[[col for col in input_data if '_N' in col]].values
@@ -641,8 +590,7 @@ class Model(object):
             feed_dict_ = {
                 self.user_indices: user_ids,
                 self.visual_emb_feat: visual_emb_feat,
-                self.item_words_indices_a: item_words_indices,
-                self.item_words_values_a: item_words_values,
+
                 self.words_lda: words_lda,
                 self.labels: labels,
                 self.one_hots_a: onehots,
@@ -702,7 +650,7 @@ class Model(object):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.val_datas:
-                labels, item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
+                labels, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
                     self.val_datas[it]
             else:
                 user_ids = data['user_indices'].values
@@ -712,7 +660,6 @@ class Model(object):
                 onehots_1 = data['face_cols_01'].tolist()
                 # onehots_2 = data[[col for col in data if '_01' in col]].values
                 onehots = np.concatenate([onehots_1], axis=1)
-                item_words_indices, item_words_values = self._item_words_indices_and_values(data)
                 # num_features = data[[col for col in data if '_N' in col]].values
                 # num_features = np.asarray(data['context'].tolist())
                 num_features = data[ctx_cols].values
@@ -722,8 +669,6 @@ class Model(object):
                 self.user_indices: user_ids,
                 self.visual_emb_feat: visual_emb_feat,
                 self.words_lda: words_lda,
-                self.item_words_indices_a: item_words_indices,
-                self.item_words_values_a: item_words_values,
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
                 self.num_features: num_features,
@@ -734,7 +679,7 @@ class Model(object):
 
             }
             if cache:
-                self.val_datas[it] = [labels, item_words_indices, item_words_values, user_ids, visual_emb_feat,
+                self.val_datas[it] = [labels, user_ids, visual_emb_feat,
                                       words_lda, onehots,
                                       num_features, face_cols_num]
             pred = self.sess.run([self.y_ui_a], feed_dict=feed_dict_)
@@ -750,9 +695,7 @@ class Model(object):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.test_datas:
-                item_words_indices, item_words_values, user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = \
-                    self.test_datas[
-                        it]
+                user_ids, visual_emb_feat, words_lda, onehots, num_features, face_cols_num = self.test_datas[it]
             else:
                 user_ids = data['user_indices'].values
                 visual_emb_feat = data['visual'].tolist()
@@ -761,14 +704,11 @@ class Model(object):
                 onehots = np.concatenate([onehots_1, ], axis=1)
                 # num_features = np.asarray(data['context'].tolist())
                 num_features = data[ctx_cols].values
-                item_words_indices, item_words_values = self._item_words_indices_and_values(data)
                 face_cols_num = data['face_cols_num'].tolist()
 
             feed_dict_ = {
                 self.user_indices: user_ids,
                 self.visual_emb_feat: visual_emb_feat,
-                self.item_words_indices_a: item_words_indices,
-                self.item_words_values_a: item_words_values,
                 self.words_lda: words_lda,
                 self.one_hots_a: onehots,
                 self.batch_size: user_ids.shape[0],
@@ -779,7 +719,7 @@ class Model(object):
                 self.train_phase: False,
             }
             if cache:
-                self.test_datas[it] = [item_words_indices, item_words_values, user_ids, visual_emb_feat,
+                self.test_datas[it] = [user_ids, visual_emb_feat,
                                        words_lda,
                                        onehots,
                                        num_features,
@@ -796,7 +736,7 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'lda_nowords_reg002_visual_lr00025.pkl'))
 
 
 if __name__ == '__main__':
@@ -837,13 +777,6 @@ if __name__ == '__main__':
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
 
-    # 删除掉user_like_mean以及ctx_oh
-    for df in [train_data, val_data, test_data]:
-        del df['user_like_mean']
-        df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
-    import gc
-    gc.collect()
-
     model_params = {
         'num_user': 37821,
         'num_recent_item': 30,
@@ -853,16 +786,16 @@ if __name__ == '__main__':
         'dim_k': 96,
         'att_dim_k': 16,
         'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.00025,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
         'deep_dims': (1024, 512, 256),
-        'checkpoint_path': '../model/lda.mdl'
+        'checkpoint_path': '../model/lda_nowords.mdl'
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')

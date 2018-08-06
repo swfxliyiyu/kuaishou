@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -267,7 +264,7 @@ class Model(object):
             self.I_Wds_a = tf.SparseTensor(indices=tf.cast(self.item_words_indices_a, dtype=np.int64),
                                            values=self.item_words_values_a,
                                            dense_shape=[tf.cast(self.batch_size, dtype=np.int64), self.num_words])
-            self.att_u_a = tf.matmul(self.Usr_Expr_a, self.Wu_oh_Att)  # [batch_size, dim_att]
+            self.att_u_a = tf.matmul(self.Usr_Emb, self.Wu_oh_Att)  # [batch_size, dim_att]
             self.att_ctx = tf.matmul(self.Ctx_Emb, self.Wctx_Att)
             self.att_oh = []
             self.bias_wds_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
@@ -282,7 +279,7 @@ class Model(object):
             self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_Wds)
 
-            vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=self.dim_k, lam=0.001, kld_loss=0.001)
+            vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=96, lam=0.001, kld_loss=0.001)
             self.I_visual_Emb, self.vae_loss = vae_encoder.get_vae_embbeding(self.visual_emb_feat)
             # TODO
             self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase, 'vis_bn')
@@ -454,7 +451,7 @@ class Model(object):
     def save_model(self, save_path):
         self.saver.save(self.sess, save_path + '.ckpt')
 
-    def load_model(self, meta_graph_path, ckpt_dir=None, ckpt_path=None):
+    def load_model(self, ckpt_dir=None, ckpt_path=None):
         """
         :meta_graph_path .meta文件路径
         :ckpt_dir 最新的检查点所在目录
@@ -462,9 +459,8 @@ class Model(object):
         """
         if ckpt_dir is None and ckpt_path is None:
             raise ValueError('Must specify ckpt_dir or ckpt_path')
-
-        # restore_saver = tf.train.import_meta_graph(meta_graph_path, )
-
+        # with self.graph.as_default():
+        #     restore_saver = tf.train.import_meta_graph(meta_graph_path)
         if ckpt_path is None:
             ckpt_path = tf.train.latest_checkpoint(ckpt_dir)
             print(ckpt_path)
@@ -540,7 +536,6 @@ class Model(object):
             if shuffle:
                 input_data = sklearn_shuffle(input_data, random_state=np.random.randint(2018))
             for j in range(iters):
-                print("Epoch {0: 2d} Step {1: 4d}...".format(i, j))
                 if isinstance(input_data, list):
                     batch_x = [
                         item[j * batch_size:(j + 1) * batch_size] for item in input_data]
@@ -552,9 +547,9 @@ class Model(object):
                     batch_x)
                 # TODO 显示频率
                 if j / iters < .5:
-                    display = int(min_display * 500)
+                    display = int(min_display * 3)
                 elif j / iters < .85:
-                    display = int(min_display * 500)
+                    display = int(min_display * 1.5)
                 else:
                     display = int(min_display / 2)
                 if j % display == 0 or j == iters - 1:
@@ -575,7 +570,7 @@ class Model(object):
                             self.best_loss = val_loss
                             if test_data is not None:
                                 self.preds = self.pred_prob(test_data)
-                            if i > 1:
+                            if epochs > 1:
                                 try:
                                     self.save_model(self.checkpoint_path + '.best')
                                 except Exception as e:
@@ -796,32 +791,57 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'lda_reg001_visual_relu_512.pkl'))
 
+    def extract_hidden(self, input_data, split):
+
+        hidden_lst = []
+        for it, data in enumerate(np.array_split(input_data, split)):
+            user_ids = data['user_indices'].values
+            visual_emb_feat = data['visual'].tolist()
+            onehots_1 = data['face_cols_01'].tolist()
+            words_lda = data['topics'].tolist()
+            onehots = np.concatenate([onehots_1, ], axis=1)
+            # num_features = np.asarray(data['context'].tolist())
+            num_features = data[ctx_cols].values
+            item_words_indices, item_words_values = self._item_words_indices_and_values(data)
+            face_cols_num = data['face_cols_num'].tolist()
+            feed_dict_ = {
+                self.user_indices: user_ids,
+                self.visual_emb_feat: visual_emb_feat,
+                self.item_words_indices_a: item_words_indices,
+                self.item_words_values_a: item_words_values,
+                self.words_lda: words_lda,
+                self.one_hots_a: onehots,
+                self.batch_size: user_ids.shape[0],
+                self.num_features: num_features,
+                self.face_num: face_cols_num,
+                self.dropout_deep: 0,
+                self.dropout_emb: 0,
+                self.train_phase: False,
+            }
+            hidden = self.sess.run([self.hidden], feed_dict=feed_dict_)
+            hidden_lst.extend(hidden[0])
+        input_data['hidden'] = [np.array(arr, np.float32) for arr in hidden_lst]
+        return input_data[['uid', 'pid', 'hidden']]
 
 if __name__ == '__main__':
     user_embs = pd.read_pickle('../model/user_emb.pkl')
     user_embs = user_embs.sort_values(['user_indices'])
     user_embs = np.array(user_embs['user_emb'].tolist(), np.float32)
-    visual_train1 = pd.read_pickle('../data/visual/visual_feature_train_1.pkl')
-    visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
-    visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
-    visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
+    # visual_train1 = pd.read_pickle('../data/visual/visual_feature_train_1.pkl')
+    # visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
+    # visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
+    # visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
 
-
-    # visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
-    # visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
+    visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
+    visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
 
     print('loaded visual...')
-    # print(visual_embs.shape[0], 'photos...')
-    # print(visual_embs['pid'].nunique(), 'unique photos...')
 
     val_data = pd.read_pickle('../data/val_data.pkl')
     train_data = pd.read_pickle('../data/train_data.pkl')
     test_data = pd.read_pickle('../data/test_data.pkl')
-    # empty = np.zeros(shape=[6])
-    # for df in [train_data, test_data, val_data]:
-    #     df['topics'] = df['topics'].apply(lambda lst: empty if pd.isna(lst) is True else lst)
 
     train_data, val_data = [pd.merge(df, visual_train, 'left', 'pid') for df in
                             [train_data, val_data]]
@@ -833,16 +853,9 @@ if __name__ == '__main__':
     print('one_hot_dims:', one_hots_dims)
 
     # dim_num_feat = val_data.ix[0, 'context'].shape[0]
-    ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col]
+    ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col]
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
-
-    # 删除掉user_like_mean以及ctx_oh
-    for df in [train_data, val_data, test_data]:
-        del df['user_like_mean']
-        df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
-    import gc
-    gc.collect()
 
     model_params = {
         'num_user': 37821,
@@ -853,11 +866,11 @@ if __name__ == '__main__':
         'dim_k': 96,
         'att_dim_k': 16,
         'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.00025,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
@@ -866,18 +879,17 @@ if __name__ == '__main__':
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')
-    fit_params = {
-        'input_data': train_data,
-        'test_data': test_data,
-        'batch_size': 8192,
-        'epochs': 3,
-        'drop_out_deep': 0.5,
-        'drop_out_emb': 0.5,
-        'validation_data': val_data,
-        'shuffle': True,
-        'initial_epoch': 0,
-        'min_display': 50,
-        'max_iter': -1,
-        'save_path': '../output/'
-    }
-    model.fit(**fit_params)
+    # 这在.ckpt加上数字，其他不用管
+    with model.graph.as_default():
+        model.load_model(ckpt_path='../model/lda.mdl.best.ckpt')
+    score = model.evaluate(val_data, cache=False)
+    print(score)
+
+    hidden_tr = model.extract_hidden(train_data, split=600)
+    hidden_val = model.extract_hidden(val_data, split=40)
+    hidden_te = model.extract_hidden(test_data, split=40)
+    hidden = pd.concat([hidden_tr, hidden_val, hidden_te], ignore_index=True, sort=False)
+    hidden.to_pickle('../model/nn_hidden.pkl')
+
+
+

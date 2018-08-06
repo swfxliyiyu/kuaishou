@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -267,7 +264,7 @@ class Model(object):
             self.I_Wds_a = tf.SparseTensor(indices=tf.cast(self.item_words_indices_a, dtype=np.int64),
                                            values=self.item_words_values_a,
                                            dense_shape=[tf.cast(self.batch_size, dtype=np.int64), self.num_words])
-            self.att_u_a = tf.matmul(self.Usr_Expr_a, self.Wu_oh_Att)  # [batch_size, dim_att]
+            self.att_u_a = tf.matmul(self.Usr_Emb, self.Wu_oh_Att)  # [batch_size, dim_att]
             self.att_ctx = tf.matmul(self.Ctx_Emb, self.Wctx_Att)
             self.att_oh = []
             self.bias_wds_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
@@ -430,9 +427,9 @@ class Model(object):
         :param optimizer: str of optimizer or predefined optimizer in tensorflow
         :return: optimizer object
         """
-
+        self.learning_rate = tf.train.exponential_decay(self.lr, self.global_step, 300, 0.96, staircase=True)
         optimizer_dict = {'sgd': tf.train.GradientDescentOptimizer(self.lr),
-                          'adam': tf.train.AdamOptimizer(self.lr),
+                          'adam': tf.train.AdamOptimizer(self.learning_rate),
                           'adagrad': tf.train.AdagradOptimizer(self.lr),
                           # 'adagradda':tf.train.AdagradDAOptimizer(),
                           'rmsprop': tf.train.RMSPropOptimizer(self.lr),
@@ -553,10 +550,10 @@ class Model(object):
                 # TODO 显示频率
                 if j / iters < .5:
                     display = int(min_display * 500)
-                elif j / iters < .85:
+                elif j / iters < .8:
                     display = int(min_display * 500)
                 else:
-                    display = int(min_display / 2)
+                    display = int(min_display * 0.6)
                 if j % display == 0 or j == iters - 1:
                     tr_loss = loss
                     self.tr_loss_list.append(tr_loss)
@@ -796,7 +793,7 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'decay_reg002_visual_lr001.pkl'))
 
 
 if __name__ == '__main__':
@@ -842,6 +839,7 @@ if __name__ == '__main__':
         del df['user_like_mean']
         df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
     import gc
+
     gc.collect()
 
     model_params = {
@@ -853,11 +851,11 @@ if __name__ == '__main__':
         'dim_k': 96,
         'att_dim_k': 16,
         'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.001,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
@@ -870,7 +868,7 @@ if __name__ == '__main__':
         'input_data': train_data,
         'test_data': test_data,
         'batch_size': 8192,
-        'epochs': 3,
+        'epochs': 5,
         'drop_out_deep': 0.5,
         'drop_out_emb': 0.5,
         'validation_data': val_data,

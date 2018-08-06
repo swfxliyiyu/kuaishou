@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -59,6 +56,7 @@ class Model(object):
         self.dim_lda = dim_lda
         self.num_faces_cols = 31
         self.dim_usr_cf_emb = 96  # 用户协同过滤embedding维度
+        self.num_cross_layer = 5
 
         self._build_graph()
 
@@ -159,10 +157,6 @@ class Model(object):
                                       initializer=tf.glorot_uniform_initializer(),
                                       dtype=tf.float32, name='words_attention')
 
-        self.W_visual_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
-                                            initializer=tf.glorot_uniform_initializer(),
-                                            dtype=tf.float32, name='visual_attention')
-
         self.W_LDA_Att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
                                          initializer=tf.glorot_uniform_initializer(),
                                          dtype=tf.float32, name='LDA_attention')
@@ -179,24 +173,15 @@ class Model(object):
         self.bias_u = tf.get_variable(shape=[self.num_user, 1], initializer=tf.zeros_initializer(), dtype=tf.float32,
                                       name='bias_u')
 
-        # 点积的attention
-        self.W_in_prd_att = tf.get_variable(shape=[self.dim_k, self.att_dim_k],
-                                            initializer=tf.glorot_uniform_initializer(),
-                                            dtype=tf.float32, name='inner_product_attention_weight')
-        self.b_in_prd_att = tf.get_variable(shape=[self.att_dim_k], initializer=tf.zeros_initializer,
-                                            dtype=tf.float32, name='inner_product_att_bias')
-        self.w_in_prd_att = tf.get_variable(shape=[self.att_dim_k, 1], initializer=tf.glorot_uniform_initializer(),
-                                            dtype=tf.float32, name='inner_product_w')
-
         # deep 参数
         if self.use_deep:
 
-            self.Wu_deep_emb = tf.get_variable(shape=[self.num_user, self.dim_k],
-                                               initializer=tf.glorot_uniform_initializer(),
-                                               dtype=tf.float32, name='user_deep_emb')
-            self.Wwords_deep_emb = tf.get_variable(shape=[self.num_words, self.dim_k],
-                                                   initializer=tf.glorot_uniform_initializer(),
-                                                   dtype=tf.float32, name='words_deep_emb')
+            # self.Wu_deep_emb = tf.get_variable(shape=[self.num_user, self.dim_k],
+            #                                    initializer=tf.glorot_uniform_initializer(),
+            #                                    dtype=tf.float32, name='user_deep_emb')
+            # self.Wwords_deep_emb = tf.get_variable(shape=[self.num_words, self.dim_k],
+            #                                        initializer=tf.glorot_uniform_initializer(),
+            #                                        dtype=tf.float32, name='words_deep_emb')
             self.W_deep_one_hots = []
             for i in range(len(self.one_hots_dims)):
                 W_temp = tf.get_variable(shape=[self.one_hots_dims[i], self.dim_k],
@@ -222,15 +207,31 @@ class Model(object):
             normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
         return normed
 
-    def _attentioned_layer(self, vectors):
-        atts = []
-        for vector in vectors:
-            att = tf.matmul(tf.nn.relu(tf.matmul(vector, self.W_in_prd_att) + self.b_in_prd_att), self.w_in_prd_att)
-            atts.append(att)
-        atts = tf.nn.softmax(tf.concat(atts, axis=1))
-        for i, vector in enumerate(vectors):
-            vectors[i] = vector * atts[:, i:i + 1]
-        return vectors
+    def _highway_layer(self, x, dim, name):
+        W_t = tf.get_variable(shape=[dim, dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                              name=name + '_W_t')
+        b_t = tf.get_variable(shape=[dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                              name=name + '_b_t')
+        t = tf.nn.sigmoid(tf.matmul(x, W_t) + b_t)
+        W = tf.get_variable(shape=[dim, dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_W')
+        b = tf.get_variable(shape=[dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_b')
+        h_x = tf.nn.relu(tf.matmul(x, W) + b)
+        z = t * h_x + (1 - t) * x
+        return z
+
+    def _cross_layer(self, x, name):
+        # x [batch_size, dim_cross]
+
+        b = tf.get_variable(shape=[self.dim_cross], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_b')
+        x_mul_w = tf.layers.dense(inputs=x,
+                                  kernel_initializer=tf.glorot_uniform_initializer(),
+                                  units=1, activation=tf.nn.relu,)  # [batch_size, 1]
+        output = self.cross_x0 * x_mul_w  # [batch_size, dim_cross]
+        output = output + b + x
+        return output
 
     def _forward_pass(self, ):
         # 用户的向量表示
@@ -282,16 +283,10 @@ class Model(object):
             self.att_I_Wds = tf.matmul(self.att_I_Wds, self.w_oh_Att) + self.c_oh_Att
             self.att_oh.append(self.att_I_Wds)
 
-            vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=self.dim_k, lam=0.001, kld_loss=0.001)
+            vae_encoder = VAE(input_dim=2048, hidden_encoder_dim=1024, latent_dim=96, lam=0.001, kld_loss=0.001)
             self.I_visual_Emb, self.vae_loss = vae_encoder.get_vae_embbeding(self.visual_emb_feat)
             # TODO
             self.I_visual_Emb = self._batch_norm_layer(self.I_visual_Emb, self.train_phase, 'vis_bn')
-            # self.I_visual_Emb = tf.layers.dropout(self.I_visual_Emb, self.dropout_emb)
-            self.att_I_visual = tf.matmul(self.I_visual_Emb, self.W_visual_Att)  # 图像的attention
-            self.att_I_visual = tf.nn.relu(self.att_u_a + self.att_ctx + self.att_I_visual + self.b_oh_Att)
-            self.att_I_visual = tf.matmul(self.att_I_visual, self.w_oh_Att) + self.c_oh_Att
-            self.att_oh.append(self.att_I_visual)
-
             self.bias_lda_emb = tf.get_variable(shape=[self.dim_k], initializer=tf.zeros_initializer(),
                                                 dtype=tf.float32,
                                                 name='bias_lda_emb')
@@ -315,101 +310,85 @@ class Model(object):
                 self.I_One_hot_a.append(I_Emb_temp_a)
             self.att_oh = tf.nn.softmax(tf.concat(self.att_oh, axis=1))  # [batch_size, oh_dim] 第一列是词attention
             self.I_Wds_Emb_a = self.I_Wds_Emb_a * self.att_oh[:, 0:1]
-            self.I_visual_Emb = self.I_visual_Emb * self.att_oh[:, 1:2]
-            self.I_LDA_Emb = self.I_LDA_Emb * self.att_oh[:, 2:3]
-            for i in range(3, len(self.one_hots_dims) + 3):
-                self.I_One_hot_a[i - 3] = self.I_One_hot_a[i - 3] * self.att_oh[:, i:i + 1]
-            self.Item_Expr_a = tf.add_n(self.I_One_hot_a + [self.I_visual_Emb, self.I_Wds_Emb_a, self.I_LDA_Emb])
+            self.I_LDA_Emb = self.I_LDA_Emb * self.att_oh[:, 1:2]
+            for i in range(2, len(self.one_hots_dims) + 2):
+                self.I_One_hot_a[i - 2] = self.I_One_hot_a[i - 2] * self.att_oh[:, i:i + 1]
 
+        with tf.name_scope('cross'):
+            self.cross_inputs = [self.Usr_Emb, self.Usr_Feat_Emb, self.num_features, self.I_visual_Emb,
+                                 self.I_Wds_Emb_a,
+                                 self.I_LDA_Emb] + self.I_One_hot_a
+            self.cross_x0 = tf.concat(self.cross_inputs, axis=1)  # [batch_size, self.dim_cross]
+            self.cross_x0 = self._batch_norm_layer(self.cross_x0, self.train_phase, 'cross_bn')
+            self.dim_cross = self.cross_x0.get_shape().as_list()[1]
+            # self.cross_x0 = tf.reshape(self.cross_x0, [-1, self.dim_cross, 1])
+            self.cross_xl = self.cross_x0
+            for l in range(self.num_cross_layer):
+                self.cross_xl = self._cross_layer(self.cross_xl, 'cross_{}'.format(l))
+                self.cross_xl = tf.layers.dropout(inputs=self.cross_xl, rate=self.dropout_emb)
+            self.cross_output = self.cross_xl
+            # self.cross_output = tf.reshape(self.cross_xl, [-1, self.dim_cross])
         with tf.name_scope('deep'):
             if self.use_deep:
-                self.Usr_emb_deep = tf.nn.embedding_lookup(self.Wu_deep_emb,
-                                                           tf.cast(self.user_indices, tf.int32))  # [batch_size, dim_k]
-                self.I_Wds_emb_deep = tf.sparse_tensor_dense_matmul(self.I_Wds_a,
-                                                                    self.Wwords_deep_emb)  # [batch_size, dim_k]
                 self.I_one_hot_deep = []
                 for i in range(len(self.one_hots_dims)):
                     I_Emb_temp_a = tf.nn.embedding_lookup(self.W_deep_one_hots[i], tf.cast(self.one_hots_a[:, i],
                                                                                            tf.int32))  # [batch_size, dim_k]
                     self.I_one_hot_deep.append(I_Emb_temp_a)
 
-                # self.deep_input = tf.concat([self.num_features, self.Usr_Feat, self.face_num, self.visual_emb_feat],
-                #                             axis=1)  # [batch_size, input_dim]
+                #
                 self.deep_input = tf.concat(
                     [self.num_features, self.visual_emb_feat] + self.I_one_hot_deep, axis=1)
                 # 输入加入batch_norm
-                # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
-                    self.deep_input = tf.layers.dense(inputs=self.deep_input,
-                                                      kernel_initializer=tf.glorot_uniform_initializer(),
-                                                      units=deep_dim, activation=tf.nn.relu, )
-
                     if i == 0:
+                        self.deep_input = tf.layers.dense(inputs=self.deep_input,
+                                                          kernel_initializer=tf.glorot_uniform_initializer(),
+                                                          units=deep_dim, activation=tf.nn.relu, )
                         self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase,
                                                                  'deep_bn_{}'.format(i))
+                    else:
+                        self.deep_input = self._highway_layer(self.deep_input, deep_dim, 'deep_highway_{}'.format(i))
                     # 加入dropout
                     self.deep_input = tf.layers.dropout(inputs=self.deep_input, rate=self.dropout_deep)
                 self.deep_output = tf.layers.dense(self.deep_input, 1, activation=None)
                 self.deep_output = tf.reshape(self.deep_output, [-1])  # [batch_size]
 
         with tf.name_scope('output'):
-            # self.cf_out = tf.layers.dropout(self.Item_Expr_a * self.Usr_Expr_a, rate=self.dropout_emb)
-            # self.ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * self.Usr_Expr_a, rate=self.dropout_emb)
-            self.ctx_item_out = tf.layers.dropout(self.Ctx_Emb * self.Item_Expr_a, rate=self.dropout_emb)
-            self.cf_outs = []
-            for usr_expr in [self.Usr_Emb, self.Usr_Feat_Emb]:
-                cf_out = tf.layers.dropout(self.Item_Expr_a * usr_expr, rate=self.dropout_emb)
-                ctx_usr_out = tf.layers.dropout(self.Ctx_Emb * usr_expr, rate=self.dropout_emb)
-                self.cf_outs.extend([cf_out, ctx_usr_out])
 
             if self.use_deep:
-                self.concated = tf.concat(self.cf_outs + [self.ctx_item_out, self.deep_input], axis=1)
+                self.concated = tf.concat([self.cross_output, self.deep_input], axis=1)
             else:
-                self.concated = tf.concat(self.cf_outs + [self.ctx_item_out], axis=1)
+                self.concated = self.cross_output
 
             self.hidden = self.concated
             for i, dim in enumerate(self.dim_hidden_out):
-                self.hidden = tf.layers.dense(inputs=self.hidden, kernel_initializer=tf.glorot_uniform_initializer(),
-                                              units=dim, activation=tf.nn.relu)
+                if i == 0:
+                    self.hidden = tf.layers.dense(inputs=self.hidden,
+                                                  kernel_initializer=tf.glorot_uniform_initializer(),
+                                                  units=dim, activation=tf.nn.relu)
+                else:
+                    self.hidden = self._highway_layer(self.hidden, dim, 'out_highway_{}'.format(i))
                 self.hidden = tf.layers.dropout(inputs=self.hidden, rate=self.dropout_deep)
             self.bu = tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32))
             self.y_ui_a = tf.layers.dense(self.hidden, 1, activation=None) + self.bu
             self.y_ui_a = tf.reshape(tf.nn.sigmoid(self.y_ui_a), [-1])
 
-            # with tf.name_scope('output'):
-            #     # 输出结果
-            #     self.y_ui_a = tf.reduce_sum(self.Item_Expr_a * self.Usr_Expr_a, axis=1)
-            #     # 用户偏置
-            #     self.y_ui_a = self.y_ui_a + tf.reshape(
-            #         tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32)), [-1])
-            #     # 整体偏置
-            #     self.y_ui_a = self.y_ui_a + self.bias
-            #     if self.use_deep:
-            #         self.y_ui_a += self.deep_output
-            #     self.y_ui_a = tf.nn.sigmoid(self.y_ui_a)
-
     def _create_loss(self):
 
         self.biases = [self.bias, self.bu,
-                       self.c_oh_Att, self.b_oh_Att, self.b_in_prd_att,
+                       self.c_oh_Att, self.b_oh_Att,
                        self.bias_usr_feat_emb, self.bias_ctx_emb, self.bias_wds_emb, self.bias_lda_emb,
                        ]
-
-        # self.params = [self.Wu_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
-        #                self.W_LDA_emb] + self.W_one_hots + self.biases
 
         self.params = [self.Usr_Emb, self.Wwords_Emb, self.W_Ctx, self.W_usr_feat_emb,
                        self.W_LDA_emb, ] + self.I_One_hot_a + self.biases
 
-        self.att_params = [self.WW_Att, self.W_visual_Att, self.Wu_oh_Att, self.Wctx_Att, self.W_LDA_Att,
+        self.att_params = [self.WW_Att, self.Wu_oh_Att, self.Wctx_Att, self.W_LDA_Att,
                            self.w_oh_Att,
-                           self.w_in_prd_att,
-                           self.W_in_prd_att,
                            ] + self.Woh_Att
 
         self.loss = tf.keras.losses.categorical_crossentropy(self.labels, self.y_ui_a)
-        # self.loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(
-        #     labels=self.labels, logits=self.y_ui_a))
         # 正则项
         for param in self.params:
             self.loss = tf.add(self.loss, self.reg * tf.nn.l2_loss(param))
@@ -434,12 +413,9 @@ class Model(object):
         optimizer_dict = {'sgd': tf.train.GradientDescentOptimizer(self.lr),
                           'adam': tf.train.AdamOptimizer(self.lr),
                           'adagrad': tf.train.AdagradOptimizer(self.lr),
-                          # 'adagradda':tf.train.AdagradDAOptimizer(),
                           'rmsprop': tf.train.RMSPropOptimizer(self.lr),
                           'moment': tf.train.MomentumOptimizer(self.lr, 0.9),
                           'ftrl': tf.train.FtrlOptimizer(self.lr)
-                          # tf.train.ProximalAdagradOptimizer#padagrad
-                          # tf.train.ProximalGradientDescentOptimizer#pgd
                           }
         if isinstance(optimizer, str):
             if optimizer in optimizer_dict.keys():
@@ -552,9 +528,9 @@ class Model(object):
                     batch_x)
                 # TODO 显示频率
                 if j / iters < .5:
-                    display = int(min_display * 500)
+                    display = int(min_display * 5)
                 elif j / iters < .85:
-                    display = int(min_display * 500)
+                    display = int(min_display * 2)
                 else:
                     display = int(min_display / 2)
                 if j % display == 0 or j == iters - 1:
@@ -570,7 +546,6 @@ class Model(object):
                         print(
                             "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
                                 i, j, tr_loss, val_loss, total_time))
-
                         if val_loss < self.best_loss:
                             self.best_loss = val_loss
                             if test_data is not None:
@@ -689,7 +664,7 @@ class Model(object):
         auc = auc_temp / (TP * FP)
         return auc
 
-    def evaluate(self, input_data, split=60, cache=True):
+    def evaluate(self, input_data, split=20, cache=True):
         """
         evaluate the model and return mean loss
         :param data: DataFrame
@@ -746,7 +721,7 @@ class Model(object):
                     del input_data[col]
         return -self.scoreAUC(labels_lst, preds_lst)
 
-    def pred_prob(self, input_data, split=60, cache=True):
+    def pred_prob(self, input_data, split=40, cache=True):
         preds_lst = []
         for it, data in enumerate(np.array_split(input_data, split)):
             if cache and it in self.test_datas:
@@ -796,7 +771,7 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'deepcross_reg002_hightway_lr00025.pkl'))
 
 
 if __name__ == '__main__':
@@ -807,7 +782,6 @@ if __name__ == '__main__':
     visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
     visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
     visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
-
 
     # visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
     # visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
@@ -833,16 +807,9 @@ if __name__ == '__main__':
     print('one_hot_dims:', one_hots_dims)
 
     # dim_num_feat = val_data.ix[0, 'context'].shape[0]
-    ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col]
+    ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col]
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
-
-    # 删除掉user_like_mean以及ctx_oh
-    for df in [train_data, val_data, test_data]:
-        del df['user_like_mean']
-        df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
-    import gc
-    gc.collect()
 
     model_params = {
         'num_user': 37821,
@@ -850,18 +817,18 @@ if __name__ == '__main__':
         'num_words': 152092,
         'dim_num_feat': dim_num_feat,
         'one_hots_dims': one_hots_dims,
-        'dim_k': 96,
-        'att_dim_k': 16,
-        'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'dim_k': 32,
+        'att_dim_k': 8,
+        'dim_hidden_out': (256, 256, 256),
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.00025,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
-        'deep_dims': (1024, 512, 256),
+        'deep_dims': (512, 512, 512),
         'checkpoint_path': '../model/lda.mdl'
     }
     model = Model(**model_params)
@@ -870,7 +837,7 @@ if __name__ == '__main__':
         'input_data': train_data,
         'test_data': test_data,
         'batch_size': 8192,
-        'epochs': 3,
+        'epochs': 10,
         'drop_out_deep': 0.5,
         'drop_out_emb': 0.5,
         'validation_data': val_data,
@@ -881,3 +848,5 @@ if __name__ == '__main__':
         'save_path': '../output/'
     }
     model.fit(**fit_params)
+
+

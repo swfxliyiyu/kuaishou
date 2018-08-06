@@ -1,8 +1,5 @@
 # coding=utf-8
 from __future__ import print_function, division
-
-import gc
-
 import pandas as pd
 import tensorflow as tf
 import time
@@ -222,6 +219,20 @@ class Model(object):
             normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
         return normed
 
+    def _hightway_layer(self, x, dim, name):
+        W_t = tf.get_variable(shape=[dim, dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                              name=name + '_W_t')
+        b_t = tf.get_variable(shape=[dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                              name=name + '_b_t')
+        t = tf.nn.sigmoid(tf.matmul(x, W_t) + b_t)
+        W = tf.get_variable(shape=[dim, dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_W')
+        b = tf.get_variable(shape=[dim], initializer=tf.glorot_uniform_initializer(), dtype=tf.float32,
+                            name=name + '_b')
+        h_x = tf.nn.relu(tf.matmul(x, W) + b)
+        z = t * h_x + (1 - t) * x
+        return z
+
     def _attentioned_layer(self, vectors):
         atts = []
         for vector in vectors:
@@ -340,13 +351,15 @@ class Model(object):
                 # 输入加入batch_norm
                 # self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase, 'input_bn')
                 for i, deep_dim in enumerate(self.deep_dims):
-                    self.deep_input = tf.layers.dense(inputs=self.deep_input,
-                                                      kernel_initializer=tf.glorot_uniform_initializer(),
-                                                      units=deep_dim, activation=tf.nn.relu, )
 
                     if i == 0:
+                        self.deep_input = tf.layers.dense(inputs=self.deep_input,
+                                                          kernel_initializer=tf.glorot_uniform_initializer(),
+                                                          units=deep_dim, activation=tf.nn.relu, )
                         self.deep_input = self._batch_norm_layer(self.deep_input, self.train_phase,
                                                                  'deep_bn_{}'.format(i))
+                    else:
+                        self.deep_input = self._hightway_layer(self.deep_input, deep_dim, 'deep_highway_{}'.format(i))
                     # 加入dropout
                     self.deep_input = tf.layers.dropout(inputs=self.deep_input, rate=self.dropout_deep)
                 self.deep_output = tf.layers.dense(self.deep_input, 1, activation=None)
@@ -369,24 +382,15 @@ class Model(object):
 
             self.hidden = self.concated
             for i, dim in enumerate(self.dim_hidden_out):
-                self.hidden = tf.layers.dense(inputs=self.hidden, kernel_initializer=tf.glorot_uniform_initializer(),
-                                              units=dim, activation=tf.nn.relu)
+                if i == 0:
+                    self.hidden = tf.layers.dense(inputs=self.hidden, kernel_initializer=tf.glorot_uniform_initializer(),
+                                                  units=dim, activation=tf.nn.relu)
+                else:
+                    self.hidden = self._hightway_layer(self.hidden, dim, 'out_highway_{}'.format(i))
                 self.hidden = tf.layers.dropout(inputs=self.hidden, rate=self.dropout_deep)
             self.bu = tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32))
             self.y_ui_a = tf.layers.dense(self.hidden, 1, activation=None) + self.bu
             self.y_ui_a = tf.reshape(tf.nn.sigmoid(self.y_ui_a), [-1])
-
-            # with tf.name_scope('output'):
-            #     # 输出结果
-            #     self.y_ui_a = tf.reduce_sum(self.Item_Expr_a * self.Usr_Expr_a, axis=1)
-            #     # 用户偏置
-            #     self.y_ui_a = self.y_ui_a + tf.reshape(
-            #         tf.nn.embedding_lookup(self.bias_u, tf.cast(self.user_indices, dtype=tf.int32)), [-1])
-            #     # 整体偏置
-            #     self.y_ui_a = self.y_ui_a + self.bias
-            #     if self.use_deep:
-            #         self.y_ui_a += self.deep_output
-            #     self.y_ui_a = tf.nn.sigmoid(self.y_ui_a)
 
     def _create_loss(self):
 
@@ -570,7 +574,6 @@ class Model(object):
                         print(
                             "Epoch {0: 2d} Step {1: 4d}: tr_loss {2: 0.6f} va_loss {3: 0.6f} tr_time {4: 0.1f}".format(
                                 i, j, tr_loss, val_loss, total_time))
-
                         if val_loss < self.best_loss:
                             self.best_loss = val_loss
                             if test_data is not None:
@@ -796,7 +799,7 @@ class Model(object):
         test_data['preds'] = preds
         test_data['preds'] = test_data['preds'].astype(np.float32)
         test_data[['uid', 'pid', 'preds']].to_pickle(
-            os.path.join(save_path, 'lda_cross_stacking_reg001_visual_dim96_lr0002.pkl'))
+            os.path.join(save_path, 'lda_reg002_hightway_lr00025.pkl'))
 
 
 if __name__ == '__main__':
@@ -807,7 +810,6 @@ if __name__ == '__main__':
     visual_train2 = pd.read_pickle('../data/visual/visual_feature_train_2.pkl')
     visual_test = pd.read_pickle('../data/visual/visual_feature_test.pkl')
     visual_train = pd.concat([visual_train1, visual_train2], ignore_index=True, sort=False)
-
 
     # visual_test = pd.read_pickle('../data/visual_feature/visual_feature_test.pkl')
     # visual_train = pd.read_pickle('../data/visual_feature/visual_feature_train.pkl')
@@ -832,17 +834,11 @@ if __name__ == '__main__':
     one_hots_dims.extend((face_cols.max(axis=0) + 1))
     print('one_hot_dims:', one_hots_dims)
 
-    # dim_num_feat = val_data.ix[0, 'context'].shape[0]
+    # dim_num_feat = val_data.ix[0, 'context'].shape[0]      # 删除新特征
     ctx_cols = [col for col in train_data.columns if 'ctx_' in col and 'ctx_01' not in col and 'diff_level' not in col]
+
     dim_num_feat = len(ctx_cols)
     print('ctx_cols:', ctx_cols)
-
-    # 删除掉user_like_mean以及ctx_oh
-    for df in [train_data, val_data, test_data]:
-        del df['user_like_mean']
-        df = df.drop(columns=[col for col in train_data.columns if 'ctx_01' in col and 'hour' not in col])
-    import gc
-    gc.collect()
 
     model_params = {
         'num_user': 37821,
@@ -852,17 +848,17 @@ if __name__ == '__main__':
         'one_hots_dims': one_hots_dims,
         'dim_k': 96,
         'att_dim_k': 16,
-        'dim_hidden_out': (512, 256, 128, 64),
-        'reg': 0.001,
+        'dim_hidden_out': (512, 512, 512),
+        'reg': 0.002,
         'att_reg': 0.2,
         'user_emb_feat': user_embs,
         'dim_lda': 6,
-        'lr': 0.0002,
+        'lr': 0.00025,
         'prefix': None,
         'seed': 1024,
         'use_deep': True,
-        'deep_dims': (1024, 512, 256),
-        'checkpoint_path': '../model/lda.mdl'
+        'deep_dims': (512, 512, 512),
+        'checkpoint_path': '../model/lda_high.mdl'
     }
     model = Model(**model_params)
     model.compile(optimizer='adam')
@@ -870,7 +866,7 @@ if __name__ == '__main__':
         'input_data': train_data,
         'test_data': test_data,
         'batch_size': 8192,
-        'epochs': 3,
+        'epochs': 10,
         'drop_out_deep': 0.5,
         'drop_out_emb': 0.5,
         'validation_data': val_data,
